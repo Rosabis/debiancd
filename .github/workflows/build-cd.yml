@@ -26,6 +26,9 @@ on:
       netinst_ver:
         description: "netinst 版本，auto = 取最新"
         default: auto
+      grub_flavors:
+        description: "把哪些 grub 引导器放进盘（空格分隔；两者互 Conflicts 故分开求解）"
+        default: "grub-pc grub-efi-amd64"
 
 permissions:
   contents: read
@@ -52,6 +55,7 @@ jobs:
           AREAS: ${{ inputs.areas }}
           EXTRA_PKGS: ${{ inputs.extra_pkgs }}
           NETINST_VER: ${{ inputs.netinst_ver }}
+          GRUB_FLAVORS: ${{ inputs.grub_flavors }}
           PATCH_PRESEED: "1"
         run: bash scripts/remaster.sh
 

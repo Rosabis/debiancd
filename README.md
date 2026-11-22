@@ -167,11 +167,25 @@ manifests/cd1-roots.txt              # 上面算出的 59 个根包 = 真正的"
 
 用法：把这个目录推成一个 repo → Actions 里手动触发 `build-install-cd`（可选 slim/task、是否装推荐包、追加 firefox-esr 等）→ 从 artifact 拿 ISO。
 
-`remaster.sh` 的 8 步：解包 netinst → 用空 dpkg 状态让 apt **算出完整桌面闭包并只下载** → 按 Debian pool 布局灌进 `pool/main/` → `apt-ftparchive` 重建 `Packages(.gz/.xz)` → 手写 `Release`（含 MD5Sum/SHA256，漏了就是 Hash Sum mismatch）→ 改 `.disk/{info,cd_type}` 为 `full_cd/single` 并重算 `md5sum.txt` → `xorriso -as mkisofs` 重新打 BIOS+UEFI 双启 ISO → 打印体积报告。
+`remaster.sh` 的 8 步：解包 netinst → 用空 dpkg 状态让 apt **算出完整桌面闭包并只下载**（grub 两个 flavor 分开求解）→ 按 Debian pool 布局灌进 `pool/main/` → `apt-ftparchive` 重建 `Packages(.gz/.xz)` → **原位更新** `Release` 里 `main/binary-amd64/Packages*` 的 MD5/SHA256/SHA512 校验行（保留 udeb 等其他条目）→ 改 `.disk/{info,cd_type}` 为 `full_cd/single` 并重算 `md5sum.txt` → `xorriso -as mkisofs` 重新打 BIOS+UEFI 双启 ISO → 打印体积报告。
+
+## 6b. 首次 CI 实测失败记录（已修）
+
+第 3 步原样报错：
+
+```
+grub-efi-amd64 : Conflicts: grub-pc but 2.12-9+deb13u4 is to be installed
+grub-pc        : Conflicts: grub-efi-amd64 but 2.12-9+deb13u4 is to be installed
+E: Unable to correct problems, you have held broken packages.
+```
+
+原因：最初把 `linux-image-amd64 grub-pc grub-efi-amd64` 一起写进 `BASE_REQUIRED`，让 apt 在一次求解里同时选中互斥的两个引导器。修法见上一条。
+
+同时修掉一个**当时还没暴露、但装机时必然犯**的问题：原脚本用整份生成的 `Release` 覆盖顶层 `dists/<rel>/Release`，会把 `main/debian-installer/binary-amd64/Packages`（udeb 索引）、`SHA512`、`Components` 等条目一起抹掉，d-i 随后找不到组件或报 Hash Sum mismatch。现在改为只替换 `main/binary-amd64/Packages*` 对应的校验行。
 
 ## 7. 第一次跑最可能挂在哪（按概率排序）
 
-0. **内核和引导器必须显式进盘。** d-i 的 `base-installer` 会从光盘里找 `linux-image-amd64`，`finish-install` 会找 `grub-pc`/`grub-efi-amd64`；清单里漏了它们，安装到一半就转去联网，离线装机直接卡死。脚本已把 `BASE_REQUIRED` 固定加进两个 profile。
+0. **内核和引导器必须显式进盘，但 grub 两个 flavor 不能一起求解。** d-i 的 `base-installer` 找 `linux-image-amd64`，`grub-installer` 按 BIOS/UEFI 分别找 `grub-pc`/`grub-efi-amd64`。trixie 里这两个包**互相 Conflicts**，写进同一个 `apt-get install` 会直接报 `held broken packages`（本次 CI 就挂在这里）。脚本现在把 `linux-image-amd64` 放主闭包，再对两个 flavor 各跑一次独立的 apt 求解，把 `.deb` 都收进 pool，由 `grub-installer` 运行时二选一。可用 `GRUB_FLAVORS` 只留一个。
 1. **`Release` 哈希/md5sum 不一致** → d-i 报 `Hash Sum mismatch`。脚本已重算，但如果你手工动过 pool 要重跑第 5 步。
 2. **tasksel 语义**：`task-xfce-desktop` 安装时默认带 Recommends，盘上缺一个就整段失败。`slim` 模式因此写成 `preseed.cfg`（`pkgsel/install-recommends false` + `pkgsel/include`）并把 `preseed/file=/cdrom/preseed.cfg` 挂到启动参数上；`task` 模式才是官方等价行为。
 3. **UEFI 引导**：`efi.img` 在 trixie 的路径可能是 `boot/grub/efi.img` 或 `EFI/boot/efi.img`，脚本自动探测；`-isohybrid-mbr` 依赖 `isolinux` 包里的 `isohdpfx.bin`。

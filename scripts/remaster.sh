@@ -27,9 +27,17 @@ OUT="${OUT:-debian-${DIST}-amd64-xfce-CD-1.iso}"
 EXTRA_PKGS="${EXTRA_PKGS:-}"
 
 # ---------- 两个 profile 的包清单 ----------
-# 注意：内核与引导器必须显式带上 —— d-i 的 base-installer/finish-install 会从光盘里找
-# linux-image-amd64 和 grub，缺了就会转去联网（离线安装直接失败）
-BASE_REQUIRED="linux-image-amd64 grub-pc grub-efi-amd64"
+# 注意：内核必须显式带上 —— d-i 的 base-installer 会从光盘里找 linux-image-amd64，
+# 缺了就会转去联网（离线安装直接失败）。
+#
+# 引导器不能两个一起交给同一次 apt 求解：trixie 里
+#   grub-efi-amd64 Conflicts: grub-pc   (反之亦然)
+# 写进同一个 install 命令必然 "held broken packages"。
+# 正确做法：主闭包不放任何 grub flavor，另外用两次独立的 apt 求解分别下载
+# grub-pc / grub-efi-amd64 及其依赖，两个 .deb 都进 pool；d-i 的 grub-installer
+# 按实际启动方式（BIOS/UEFI）自己 apt-install 对应的那个。
+GRUB_FLAVORS="${GRUB_FLAVORS:-grub-pc grub-efi-amd64}"
+BASE_REQUIRED="linux-image-amd64"
 
 # slim：只装"能进桌面、能上网、能出声"的最小集（推荐值）
 SLIM_PKGS="
@@ -74,7 +82,7 @@ fi
 if [ -n "${BASE_ISO_OVERRIDE:-}" ]; then
   [ -f "$BASE_ISO_OVERRIDE" ] || die "BASE_ISO_OVERRIDE 不存在: $BASE_ISO_OVERRIDE"
   BASE_ISO="$BASE_ISO_OVERRIDE"
-  [ "$NETINST_VER" = "auto" ] && NETINST_VER="custom"
+  if [ "$NETINST_VER" = "auto" ]; then NETINST_VER="custom"; fi
 else
   BASE_ISO="debian-${NETINST_VER}-amd64-netinst.iso"
   [ -f "$BASE_ISO" ] || curl -fL --retry 3 -o "$BASE_ISO" \
@@ -106,11 +114,29 @@ apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" update -qq
 # shellcheck disable=SC2086
 apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" install -y --download-only $PKGS $EXTRA_PKGS \
   > download.log 2>&1 || { tail -40 download.log; die "依赖解析失败，见 work/download.log"; }
-DEB_N=$(ls -1 debs/*.deb 2>/dev/null | wc -l)
+
+# 引导器：两个 flavor 各自独立求解，避开 grub-pc <-> grub-efi-amd64 的 Conflicts。
+# 各自的依赖（grub-common / grub2-common / *-bin）会一起下下来，合并进同一个 debs/。
+for flavor in $GRUB_FLAVORS; do
+  fdir="debs-grub-$flavor"
+  rm -rf "$fdir"; mkdir -p "$fdir"
+  apt-get "${REPO_OPTS[@]}" \
+    -o "Dir::State::status=/dev/null" \
+    -o "Dir::Cache::archives=$WORK/$fdir" \
+    -o "APT::Install-Recommends=false" \
+    -o "APT::Install-Suggests=false" \
+    install -y --download-only "$flavor" > "download-$flavor.log" 2>&1 \
+    || { tail -30 "download-$flavor.log"; die "引导器 $flavor 依赖解析失败"; }
+  n=$(find "$fdir" -maxdepth 1 -name '*.deb' | wc -l)
+  echo "    引导器 $flavor: $n 个 deb"
+  find "$fdir" -maxdepth 1 -name '*.deb' -exec cp -n {} debs/ \;
+done
+
+DEB_N=$(find debs -maxdepth 1 -name '*.deb' | wc -l)
 DEB_MB=$(du -sm debs | cut -f1)
 [ "$DEB_N" -gt 0 ] || die "没有下载到任何 deb"
 echo "    下载 $DEB_N 个 deb，共 ${DEB_MB} MiB"
-echo "$PKGS $EXTRA_PKGS" | tr -s ' \n' '\n' | grep -v '^$' | sort -u > selected-pkgs.txt
+echo "$PKGS $EXTRA_PKGS $GRUB_FLAVORS" | tr -s ' \n' '\n' | grep -v '^$' | sort -u > selected-pkgs.txt
 
 # ---------- 4. 塞进 pool/ ----------
 log "4/8 复制 deb 到 tree/pool/main/"
@@ -164,13 +190,39 @@ gen_release() {   # $1=目录  $2=路径前缀
 }
 gen_release "$IDX" ""
 if [ -f "tree/dists/$DIST/Release" ]; then
-  # netinst 若带顶层 Release，则按 main/binary-amd64/ 前缀重算
-  TMPD=$(mktemp -d)
-  cp "$IDX"/Packages* "$TMPD"/
-  gen_release "$TMPD" "main/binary-amd64/"
-  mv "$TMPD/Release" "tree/dists/$DIST/Release"
-  rm -rf "$TMPD"
-  echo "    已重算顶层 dists/$DIST/Release"
+  # 只替换 main/binary-amd64/Packages* 的校验行，**保留原 Release 的其余内容**。
+  # 不能整份重写：原 Release 里还有 main/debian-installer/binary-amd64/Packages
+  # （udeb 索引）、SHA512、Components 等条目，整份替换会让 d-i 找不到 udeb 或
+  # 报 Hash Sum mismatch。
+  REL="tree/dists/$DIST/Release"
+  HASHES="$WORK/release-hashes.tsv"
+  : > "$HASHES"
+  for alg in MD5Sum SHA256 SHA512; do
+    case "$alg" in
+      MD5Sum) sum=md5sum ;;
+      SHA256) sum=sha256sum ;;
+      SHA512) sum=sha512sum ;;
+    esac
+    for f in Packages Packages.gz Packages.xz; do
+      [ -f "$IDX/$f" ] || continue
+      printf '%s\t%s\t%s\t%s\n' "$alg" "main/binary-amd64/$f" \
+        "$($sum "$IDX/$f" | cut -d' ' -f1)" "$(stat -c%s "$IDX/$f")" >> "$HASHES"
+    done
+  done
+  awk -F'\t' '
+    NR==FNR { key[$1 SUBSEP $2]=$3; siz[$1 SUBSEP $2]=$4; next }
+    /^(MD5Sum|SHA1|SHA256|SHA512):[[:space:]]*$/ {
+      sec=$1; sub(/:$/, "", sec); print; next
+    }
+    sec != "" && $0 ~ /^ [0-9a-fA-F]+[[:space:]]+[0-9]+[[:space:]]+/ {
+      rest=substr($0, 2); n=split(rest, p, /[[:space:]]+/)
+      path=p[n]; k=sec SUBSEP path
+      if (k in key) { printf " %s %16s %s\n", key[k], siz[k], path; next }
+    }
+    { print }
+  ' "$HASHES" "$REL" > "$REL.new"
+  mv "$REL.new" "$REL"
+  echo "    已原位更新顶层 Release 的 main/binary-amd64 校验行（保留 udeb 等条目）"
 fi
 
 # ---------- 6. 改 .disk 元数据 + 可选 preseed ----------
