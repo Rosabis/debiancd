@@ -185,10 +185,9 @@ REPO_OPTS=(-o "Dir::Etc::sourcelist=$WORK/sources.list" \
            -o "Dir::Etc::sourceparts=$WORK/empty-sourceparts")
 apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" update -qq \
   || die "apt update 失败，检查 $WORK/sources.list 与网络"
-# 早失败：之前相对 WORK 会让 apt 静默读到空源，最后报一大串 Unable to locate package
-if ! apt-cache "${REPO_OPTS[@]}" policy linux-image-amd64 2>/dev/null | grep -q 'Candidate: [0-9]'; then
-  die "apt 源未生效（源内容: $(cat "$WORK/sources.list")）"
-fi
+# 只打印诊断，不作阻断：apt-cache 在最小容器里的输出格式不稳定，
+# 之前用 policy 做 gate 会误杀正常流程；真正的解析失败由下面的 install 给出明确报错。
+echo "    apt 源: $(cat "$WORK/sources.list")"
 # shellcheck disable=SC2086
 apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" install -y --download-only $PKGS $EXTRA_PKGS \
   > download.log 2>&1 || { tail -40 download.log; die "依赖解析失败，见 work/download.log"; }

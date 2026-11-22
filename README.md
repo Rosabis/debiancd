@@ -221,7 +221,7 @@ E: Unable to locate package xfce4
 
 原因：`-o Dir::Etc::sourcelist=$WORK/sources.list` 收的是**绝对路径**；当 workflow 把 `WORK` 设成相对的 `work` 时，apt 把它解析成 `/etc/apt/work/sources.list`，读了个空源却不报错，直到 install 阶段才一口气报所有包找不到。
 
-已修：脚本 `cd "$WORK"` 后把 `WORK="$PWD"` 规范化；`sourceparts` 也改成真实的空目录而不是 `-`（消除 `/etc/apt/-/` 警告）；`apt update` 后加一道 `apt-cache policy linux-image-amd64` 的早失败检查，源没生效会立刻报出源内容，不再拖到 install 阶段。
+已修：脚本 `cd "$WORK"` 后把 `WORK="$PWD"` 规范化；`sourceparts` 也改成真实的空目录而不是 `-`（消除 `/etc/apt/-/` 警告）。`apt update` 后只打印源内容作诊断——曾尝试用 `apt-cache policy` 做早失败 gate，但最小容器里它的输出不稳定，会误杀正常流程，已改为非阻断；真正的解析失败由 `apt-get install` 给出明确报错。
 
 ## 7. 第一次跑最可能挂在哪（按概率排序）
 
