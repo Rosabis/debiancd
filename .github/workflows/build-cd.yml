@@ -1,0 +1,76 @@
+name: build-install-cd
+
+# 路线 A：在官方 netinst 上灌入桌面闭包，产出"自带桌面的离线安装 CD"
+on:
+  workflow_dispatch:
+    inputs:
+      dist:
+        description: "目标发行版代号"
+        default: trixie
+      profile:
+        description: "slim = 最小桌面(推荐) / task = 官方 xfce 任务全量"
+        type: choice
+        options: [slim, task]
+        default: slim
+      recommends:
+        description: "是否安装 Recommends（slim 建议 no）"
+        type: choice
+        options: ["no", "yes"]
+        default: "no"
+      areas:
+        description: "启用的归档区（需要固件就带上 non-free-firmware）"
+        default: main
+      extra_pkgs:
+        description: "追加软件包，空格分隔（如 firefox-esr libreoffice-writer）"
+        default: ""
+      netinst_ver:
+        description: "netinst 版本，auto = 取最新"
+        default: auto
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 90
+    steps:
+      # debian:trixie 官方镜像里没有 git，checkout 会失败，先补上
+      - name: 准备容器
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git ca-certificates curl
+
+      - uses: actions/checkout@v4
+
+      - name: 构建安装 CD
+        env:
+          DIST: ${{ inputs.dist }}
+          PROFILE: ${{ inputs.profile }}
+          INSTALL_RECOMMENDS: ${{ inputs.recommends }}
+          AREAS: ${{ inputs.areas }}
+          EXTRA_PKGS: ${{ inputs.extra_pkgs }}
+          NETINST_VER: ${{ inputs.netinst_ver }}
+          PATCH_PRESEED: "1"
+        run: bash scripts/remaster.sh
+
+      - name: 摘要
+        run: |
+          {
+            echo "### 产物"
+            echo '```'
+            ls -lh work/*.iso work/*.sha256 2>/dev/null || true
+            echo '```'
+            echo "profile=\`${{ inputs.profile }}\` recommends=\`${{ inputs.recommends }}\` areas=\`${{ inputs.areas }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian-${{ inputs.dist }}-xfce-CD-1
+          path: |
+            work/*.iso
+            work/*.sha256
+            work/tree/dists/**/Packages
+          compression-level: 0
+          retention-days: 7

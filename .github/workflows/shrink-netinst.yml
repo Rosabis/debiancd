@@ -1,0 +1,68 @@
+name: shrink-netinst
+
+# 把官方 netinst 的 non-free-firmware（可选图形安装器）摘掉，看它到底能缩到多小
+# 目的：验证"netinst 变大主要是固件"这个判断，并产出一个能刻 CD 的小镜像
+on:
+  workflow_dispatch:
+    inputs:
+      dist:
+        description: "发行版代号"
+        default: trixie
+      netinst_ver:
+        description: "版本，auto = 取最新"
+        default: auto
+      keep_firmware:
+        description: "保留固件（对照组，默认删）"
+        type: boolean
+        default: false
+      drop_gui:
+        description: "同时删掉图形安装器（只能文本安装，省 40–90 MiB）"
+        type: boolean
+        default: false
+      firmware_keep:
+        description: "只保留这些固件包（空格分隔，如 firmware-amd-graphics）；留空则全删"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  shrink:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 60
+    steps:
+      - name: 准备容器
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git ca-certificates curl
+
+      - uses: actions/checkout@v4
+
+      - name: 裁剪
+        env:
+          DIST: ${{ inputs.dist }}
+          NETINST_VER: ${{ inputs.netinst_ver }}
+          KEEP_FIRMWARE: ${{ inputs.keep_firmware && '1' || '0' }}
+          DROP_GUI: ${{ inputs.drop_gui && '1' || '0' }}
+          FIRMWARE_KEEP: ${{ inputs.firmware_keep }}
+        run: bash scripts/shrink-netinst.sh
+
+      - name: 体积对比
+        run: |
+          {
+            echo "### 体积对比"
+            echo '```'
+            du -h work-shrink/*.iso 2>/dev/null || true
+            echo '```'
+            echo "keep_firmware=${{ inputs.keep_firmware }} drop_gui=${{ inputs.drop_gui }} firmware_keep=\`${{ inputs.firmware_keep }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netinst-slim-${{ inputs.dist }}
+          path: |
+            work-shrink/*.iso
+            work-shrink/*.sha256
+          compression-level: 0
+          retention-days: 7

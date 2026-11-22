@@ -1,0 +1,81 @@
+name: build-xfce-gpu-fw
+
+# 组合路线：trixie netinst → 只留一块显卡的固件 → 灌入 XFCE → 一张接近 bullseye 大小的盘
+# 目标：把 758 MB 里的 339 MB 全量固件砍到 8~16 MB（NVIDIA 例外 99 MB），再把 XFCE 塞进去
+on:
+  workflow_dispatch:
+    inputs:
+      gpu:
+        description: "只保留哪个厂商的显卡固件"
+        type: choice
+        options: [amd, intel, nvidia, none]
+        default: amd
+      dist:
+        default: trixie
+      extra_pkgs:
+        description: "追加包（如 firefox-esr），空格分隔"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 90
+    steps:
+      - name: 准备容器
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git ca-certificates curl
+
+      - uses: actions/checkout@v4
+
+      - name: 选择固件包
+        run: |
+          case "${{ inputs.gpu }}" in
+            amd)    FW="firmware-amd-graphics" ;;
+            intel)  FW="firmware-intel-graphics firmware-intel-misc" ;;
+            nvidia) FW="firmware-nvidia-graphics" ;;
+            *)      FW="" ;;
+          esac
+          echo "FIRMWARE_KEEP=$FW" >> "$GITHUB_ENV"
+          echo "选中的固件：$FW"
+
+      - name: 1/2 裁掉其余固件
+        env:
+          DIST: ${{ inputs.dist }}
+          WORK: work-shrink
+          OUT: base.iso
+        run: bash scripts/shrink-netinst.sh
+
+      - name: 2/2 灌入 XFCE
+        env:
+          DIST: ${{ inputs.dist }}
+          AREAS: main
+          PROFILE: slim
+          WORK: work-xfce
+          OUT: debian-xfce-gpu.iso
+          EXTRA_PKGS: ${{ inputs.extra_pkgs }}
+          BASE_ISO_OVERRIDE: ${{ github.workspace }}/work-shrink/base.iso
+        run: bash scripts/remaster.sh
+
+      - name: 体积对比
+        run: |
+          {
+            echo "### 体积对比"
+            echo '```'
+            ls -lh work-shrink/base.iso work-xfce/*.iso 2>/dev/null || true
+            echo '```'
+            echo "gpu=${{ inputs.gpu }} firmware=\`$FIRMWARE_KEEP\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian-xfce-${{ inputs.gpu }}-${{ inputs.dist }}
+          path: |
+            work-xfce/*.iso
+            work-xfce/*.sha256
+          compression-level: 0
+          retention-days: 7

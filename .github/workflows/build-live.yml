@@ -1,0 +1,109 @@
+name: build-live
+
+# 路线 B：live-build 出一个"开机即桌面"的 Live 镜像（内置安装器，可选装到硬盘）
+# 体积靠 config/package-lists 直接控制；squashfs 压缩，天然比安装 CD 小一截
+# 跑在 runner 宿主机而不是容器里：debootstrap/mount 需要完整权限
+on:
+  workflow_dispatch:
+    inputs:
+      dist:
+        description: "目标发行版代号"
+        default: trixie
+      compression:
+        type: choice
+        options: [xz, zstd]
+        default: xz
+      recommends:
+        description: "是否安装 Recommends（关掉更小，可能少些便利功能）"
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 live-build
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            live-build debootstrap debian-archive-keyring \
+            isolinux syslinux-common syslinux-utils \
+            mtools dosfstools squashfs-tools xorriso \
+            ca-certificates curl xz-utils zstd
+
+      - name: 配置
+        run: |
+          sudo lb config \
+            --distribution "${{ inputs.dist }}" \
+            --binary-images iso-hybrid \
+            --debian-installer live \
+            --archive-areas "main contrib non-free-firmware" \
+            --apt-recommends "${{ inputs.recommends }}" \
+            --apt-indices false \
+            --firmware-chroot false \
+            --memtest none \
+            --win32-loader false \
+            --zsync false \
+            --iso-application "Debian Slim XFCE" \
+            --iso-volume "DEBSLIM" \
+            --bootappend-live "boot=live components quiet splash" \
+            --linux-flavours amd64 \
+            --compression "${{ inputs.compression }}" \
+            --compression-level 9
+
+      - name: 写入包清单
+        run: |
+          # 增删软件只改这一个文件；不加 firefox 就省 ~130 MiB
+          sudo mkdir -p config/package-lists
+          sudo tee config/package-lists/custom.list.chroot >/dev/null <<'EOF'
+          xfce4
+          xfce4-terminal
+          thunar
+          mousepad
+          xfce4-taskmanager
+          xfce4-whiskermenu-plugin
+          lightdm
+          lightdm-gtk-greeter
+          xorg
+          dbus-x11
+          sudo
+          network-manager
+          network-manager-gnome
+          pipewire
+          pipewire-pulse
+          wireplumber
+          alsa-utils
+          fonts-dejavu-core
+          EOF
+
+      - name: 构建
+        run: |
+          sudo lb build 2>&1 | tee build.log
+
+      - name: 摘要
+        run: |
+          {
+            echo "### 产物"
+            echo '```'
+            ls -lh *.iso *.sha256 2>/dev/null || true
+            echo '```'
+            echo "compression=${{ inputs.compression }} recommends=${{ inputs.recommends }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debian-live-${{ inputs.dist }}-xfce
+          path: |
+            *.iso
+            *.sha256
+            build.log
+          compression-level: 0
+          retention-days: 7
