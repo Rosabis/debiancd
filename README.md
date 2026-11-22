@@ -161,7 +161,8 @@ live ISO ≈ 装完占用 × 0.35~0.45（xz squashfs）
 .github/workflows/build-live.yml     # 路线 B：live-build → Live 桌面
 .github/workflows/shrink-netinst.yml # 路线 C：把官方 netinst 的固件摘掉，复刻 bullseye 量级
 .github/workflows/build-xfce-gpu-fw.yml # 路线 D：只留显卡固件 + XFCE（最贴近你那张盘）
-scripts/remaster.sh                  # A 的实现（8 步，含体积报告；支持 BASE_ISO_OVERRIDE）
+.github/workflows/build-bullseye-exact.yml # 路线 E：正式版 bullseye + 998 组件全量复刻
+scripts/remaster.sh                  # A/D/E 的实现（8 步，含体积报告；支持 BASE_ISO_OVERRIDE / NETINST_URL / PROFILE=exact）
 scripts/shrink-netinst.sh            # C 的实现（LBA 去重体积解剖 + FIRMWARE_KEEP 白名单 + 可选摘图形安装器）
 manifests/cd1-packages.tsv           # 从你这张 ISO 解出的 998 包全量清单（名/版/架/大小/section）
 manifests/cd1-roots.txt              # 上面算出的 59 个根包 = 真正的"点选清单"
@@ -222,6 +223,16 @@ E: Unable to locate package xfce4
 原因：`-o Dir::Etc::sourcelist=$WORK/sources.list` 收的是**绝对路径**；当 workflow 把 `WORK` 设成相对的 `work` 时，apt 把它解析成 `/etc/apt/work/sources.list`，读了个空源却不报错，直到 install 阶段才一口气报所有包找不到。
 
 已修：脚本 `cd "$WORK"` 后把 `WORK="$PWD"` 规范化；`sourceparts` 也改成真实的空目录而不是 `-`（消除 `/etc/apt/-/` 警告）。`apt update` 后只打印源内容作诊断——曾尝试用 `apt-cache policy` 做早失败 gate，但最小容器里它的输出不稳定，会误杀正常流程，已改为非阻断；真正的解析失败由 `apt-get install` 给出明确报错。
+
+## 6e. 路线 E：正式版 bullseye 的同组件复刻
+
+新增 `.github/workflows/build-bullseye-exact.yml`：目标和那张 2019 年 alpha1 盘**组件列表完全一样**，但用正式版 bullseye 11.11.0 的包。
+
+- 基座：官方归档镜像 `https://cdimage.debian.org/cdimage/archive/11.11.0/amd64/iso-cd/debian-11.11.0-amd64-netinst.iso`（当前 `current/` 已无 bullseye，只有 `archive/`）；`remaster.sh` 新增 `NETINST_URL` 直接指定。
+- 组件：`PROFILE=exact` 读 `manifests/cd1-packages.tsv` 的 998 个包名。2019 → 11.11.0 之间必然有改名/删除（`libllvm9→11`、`gcc-9→10`、`libicu63→67`、`python2.7` 等），脚本先和当前 `bullseye/main` 的 `Packages` 取交集，把失效项写进 `work/missing-names.txt` 并打印，再用剩余包名让 apt 算闭包——不会像"照抄包名"那样整批 `Unable to locate package`。
+- 若 998 项里有解析不出来的组合，可把 `manifest` 输入改成 `manifests/cd1-roots.txt`（59 个根包）退到更稳的闭包。
+- 保持参照盘特征：`AREAS=main`、`INSTALL_RECOMMENDS=yes`、保留图形安装器 initrd、不动固件组件。产物 `debian-bullseye-amd64-xfce-CD-1.iso`，预计 **650–750 MiB**（正式版内核/浏览器比 2019 alpha 大，不保证刚好 647）。
+- 上传 artifact 现在只列**具体产物文件名**，不再用 `work/*.iso` 通配，所以基座 `debian-13.8.0-amd64-netinst.iso`（或 11.11.0）不会占 artifact 体积。`build-cd.yml` / `build-xfce-gpu-fw.yml` 也已同样处理。
 
 ## 7. 第一次跑最可能挂在哪（按概率排序）
 

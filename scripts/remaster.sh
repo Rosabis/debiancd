@@ -18,7 +18,7 @@ AREAS="${AREAS:-main}"                 # 需要固件就写 "main contrib non-fr
 MIRROR="${MIRROR:-http://deb.debian.org/debian}"
 CDIMAGE="${CDIMAGE:-https://cdimage.debian.org/debian-cd}"
 NETINST_VER="${NETINST_VER:-auto}"     # auto = 从 SHA256SUMS 里解析最新版
-PROFILE="${PROFILE:-slim}"             # slim | task
+PROFILE="${PROFILE:-slim}"             # slim | task | exact（exact = 照 manifests/cd1-packages.tsv 的 998 项复刻）
 INSTALL_RECOMMENDS="${INSTALL_RECOMMENDS:-no}"   # slim 建议 no，task 建议 yes
 PATCH_PRESEED="${PATCH_PRESEED:-1}"    # 是否把 pkgsel/include preseed 挂到启动命令上
 SIZE_LIMIT_MB="${SIZE_LIMIT_MB:-800}"  # CD-R 实际约 700 MiB，超过只是告警（写 U 盘无妨）
@@ -64,6 +64,7 @@ PRESEED_EXTRA="$FIRMWARE_KEEP"
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31m[FAIL] %s\033[0m\n' "$*" >&2; exit 1; }
 
+REPO_ROOT="$PWD"   # 清单文件在仓库里，cd 到 WORK 之后要用绝对路径找
 mkdir -p "$WORK"
 cd "$WORK"
 # apt 的 -o Dir::Etc::sourcelist=<path> 必须是绝对路径；给相对路径时它会
@@ -90,6 +91,13 @@ if [ -n "${BASE_ISO_OVERRIDE:-}" ]; then
   [ -f "$BASE_ISO_OVERRIDE" ] || die "BASE_ISO_OVERRIDE 不存在: $BASE_ISO_OVERRIDE"
   BASE_ISO="$BASE_ISO_OVERRIDE"
   if [ "$NETINST_VER" = "auto" ]; then NETINST_VER="custom"; fi
+elif [ -n "${NETINST_URL:-}" ]; then
+  # 老版本（如 bullseye 11.11.0）只在 cdimage/archive/ 下，不在 current/
+  BASE_ISO=$(basename "$NETINST_URL")
+  [ -f "$BASE_ISO" ] || curl -fL --retry 3 -o "$BASE_ISO" "$NETINST_URL"
+  if [ "$NETINST_VER" = "auto" ]; then
+    NETINST_VER=$(printf '%s' "$BASE_ISO" | sed -E 's/^debian-([0-9.]+)-amd64-netinst\.iso$/\1/')
+  fi
 else
   BASE_ISO="debian-${NETINST_VER}-amd64-netinst.iso"
   [ -f "$BASE_ISO" ] || curl -fL --retry 3 -o "$BASE_ISO" \
@@ -183,6 +191,32 @@ printf 'deb %s %s %s\n' "$MIRROR" "$DIST" "$AREAS" > sources.list
 mkdir -p empty-sourceparts
 REPO_OPTS=(-o "Dir::Etc::sourcelist=$WORK/sources.list" \
            -o "Dir::Etc::sourceparts=$WORK/empty-sourceparts")
+# exact profile：用参照盘解出的 998 个包名，在目标发行版里按"还存在的"取交集。
+# 老盘是 2019 年的 bullseye alpha，包改名/删除很常见（libllvm9→11、python2.7 等），
+# 直接照抄会让 apt 报 Unable to locate package；这里先和当前 main 索引取交集。
+if [ "$PROFILE" = "exact" ]; then
+  MANIFEST="${MANIFEST:-$REPO_ROOT/manifests/cd1-packages.tsv}"
+  case "$MANIFEST" in /*) ;; *) MANIFEST="$REPO_ROOT/$MANIFEST" ;; esac
+  [ -f "$MANIFEST" ] || die "找不到组件清单: $MANIFEST"
+  cut -f1 "$MANIFEST" | sed -E 's/[[:space:]]+$//' | grep -v '^$' | sort -u > manifest-names.txt
+  if curl -fsSL "$MIRROR/dists/$DIST/main/binary-amd64/Packages.xz" -o remote-Packages.xz; then
+    xz -dc remote-Packages.xz | awk '/^Package: /{print $2}' | sort -u > remote-names.txt
+  else
+    curl -fsSL "$MIRROR/dists/$DIST/main/binary-amd64/Packages.gz" -o remote-Packages.gz \
+      || die "无法获取 $DIST 的 Packages 索引"
+    gzip -dc remote-Packages.gz | awk '/^Package: /{print $2}' | sort -u > remote-names.txt
+  fi
+  comm -12 manifest-names.txt remote-names.txt > exact-names.txt
+  comm -23 manifest-names.txt remote-names.txt > missing-names.txt
+  # 内核版本与 grub flavor 由脚本专门处理（grub-pc/efi 互斥、内核元包跟版本走）
+  grep -v -E '^(grub|linux-image-)' exact-names.txt > exact-names.filtered.txt || true
+  mv exact-names.filtered.txt exact-names.txt
+  printf '    组件清单 %s 项 → 目标版可用 %s 项 / 已失效 %s 项\n' \
+    "$(wc -l < manifest-names.txt)" "$(wc -l < exact-names.txt)" "$(wc -l < missing-names.txt)"
+  head -15 missing-names.txt | sed 's/^/      失效: /'
+  PKGS="$BASE_REQUIRED $(tr '\n' ' ' < exact-names.txt)"
+fi
+
 apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" update -qq \
   || die "apt update 失败，检查 $WORK/sources.list 与网络"
 # 只打印诊断，不作阻断：apt-cache 在最小容器里的输出格式不稳定，

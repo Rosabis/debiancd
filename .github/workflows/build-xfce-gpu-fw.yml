@@ -70,7 +70,7 @@ jobs:
           {
             echo "### 产物"
             echo '```'
-            ls -lh work/*.iso work/*.sha256 2>/dev/null || true
+            ls -lh work/debian-trixie-amd64-xfce-CD-1.iso* work/selected-pkgs.txt 2>/dev/null || true
             echo '```'
             echo "gpu=${{ inputs.gpu }} firmware=\`$FIRMWARE_KEEP\` grub=\`${{ inputs.grub_flavors }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -79,8 +79,8 @@ jobs:
         with:
           name: debian-xfce-${{ inputs.gpu }}-${{ inputs.dist }}
           path: |
-            work/*.iso
-            work/*.sha256
+            work/debian-trixie-amd64-xfce-CD-1.iso
+            work/debian-trixie-amd64-xfce-CD-1.iso.sha256
             work/selected-pkgs.txt
           compression-level: 0
           retention-days: 7

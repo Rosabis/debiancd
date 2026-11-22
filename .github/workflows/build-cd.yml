@@ -66,6 +66,7 @@ jobs:
           AREAS: ${{ inputs.areas }}
           EXTRA_PKGS: ${{ inputs.extra_pkgs }}
           NETINST_VER: ${{ inputs.netinst_ver }}
+          OUT: debian-${{ inputs.dist }}-amd64-xfce-CD-1.iso
           GRUB_FLAVORS: ${{ inputs.grub_flavors }}
           STRIP_FIRMWARE: ${{ inputs.strip_firmware && '1' || '0' }}
           FIRMWARE_KEEP: ${{ inputs.firmware_keep }}
@@ -78,7 +79,7 @@ jobs:
           {
             echo "### 产物"
             echo '```'
-            ls -lh work/*.iso work/*.sha256 2>/dev/null || true
+            ls -lh work/debian-${{ inputs.dist }}-amd64-xfce-CD-1.iso* work/selected-pkgs.txt 2>/dev/null || true
             echo '```'
             echo "profile=\`${{ inputs.profile }}\` recommends=\`${{ inputs.recommends }}\` areas=\`${{ inputs.areas }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -87,8 +88,9 @@ jobs:
         with:
           name: debian-${{ inputs.dist }}-xfce-CD-1
           path: |
-            work/*.iso
-            work/*.sha256
+            work/debian-${{ inputs.dist }}-amd64-xfce-CD-1.iso
+            work/debian-${{ inputs.dist }}-amd64-xfce-CD-1.iso.sha256
+            work/selected-pkgs.txt
             work/tree/dists/**/Packages
           compression-level: 0
           retention-days: 7

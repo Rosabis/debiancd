@@ -1,0 +1,85 @@
+name: build-bullseye-exact
+
+# 正式版 bullseye（11.11.0）+ 与 2019 年 alpha1 xfce-CD-1 完全相同的组件列表。
+# 组件清单来自 manifests/cd1-packages.tsv（998 项，从参照 ISO 的 Packages 解出）。
+# 注意：老盘是 2019 年的 bullseye alpha，部分包名在 11.11.0 已改名/删除；
+#       脚本会先和当前 bullseye/main 的 Packages 取交集，打印失效项后继续。
+# 参照盘 647 MiB；正式版内核/浏览器更大，产物预计 650~750 MiB。
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: "组件清单（默认 998 项全量；填 manifests/cd1-roots.txt 可退到 59 个根包）"
+        default: manifests/cd1-packages.tsv
+      recommends:
+        description: "是否带 Recommends（参照盘的任务安装带，建议 yes）"
+        type: choice
+        options: ["yes", "no"]
+        default: "yes"
+      drop_extra_initrd:
+        description: "摘掉图形安装器 initrd（参照盘带 gtk，默认保留）"
+        type: boolean
+        default: false
+      extra_pkgs:
+        description: "追加包，空格分隔"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 90
+    steps:
+      - name: 准备容器
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git ca-certificates curl
+
+      - uses: actions/checkout@v4
+
+      - name: 构建 bullseye 同组件 CD
+        env:
+          DIST: bullseye
+          PROFILE: exact
+          MANIFEST: ${{ inputs.manifest }}
+          NETINST_VER: "11.11.0"
+          NETINST_URL: https://cdimage.debian.org/cdimage/archive/11.11.0/amd64/iso-cd/debian-11.11.0-amd64-netinst.iso
+          MIRROR: http://deb.debian.org/debian
+          AREAS: main
+          INSTALL_RECOMMENDS: ${{ inputs.recommends }}
+          GRUB_FLAVORS: "grub-pc grub-efi-amd64"
+          STRIP_FIRMWARE: "0"
+          DROP_EXTRA_INITRD: ${{ inputs.drop_extra_initrd && '1' || '0' }}
+          WORK: work
+          OUT: debian-bullseye-amd64-xfce-CD-1.iso
+          EXTRA_PKGS: ${{ inputs.extra_pkgs }}
+          PATCH_PRESEED: "1"
+        run: bash scripts/remaster.sh
+
+      - name: 摘要
+        run: |
+          {
+            echo "### 产物：bullseye 同组件复刻"
+            echo '```'
+            ls -lh work/debian-bullseye-amd64-xfce-CD-1.iso* 2>/dev/null || true
+            echo '```'
+            echo "manifest=\`${{ inputs.manifest }}\` recommends=\`${{ inputs.recommends }}\`"
+            echo '```'
+            cat work/missing-names.txt 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian-bullseye-exact-CD-1
+          path: |
+            work/debian-bullseye-amd64-xfce-CD-1.iso
+            work/debian-bullseye-amd64-xfce-CD-1.iso.sha256
+            work/selected-pkgs.txt
+            work/missing-names.txt
+            work/tree/dists/**/Packages
+          compression-level: 0
+          retention-days: 7
