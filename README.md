@@ -208,6 +208,21 @@ E: Unable to correct problems, you have held broken packages.
 
 `build-xfce-gpu-fw.yml` 也简化成单步（自己调 `remaster.sh`），不再先跑 `shrink-netinst.sh`，避免重复解包与二次覆盖。
 
+## 6d. 第三跑实测：apt 读不到 sources.list（已修）
+
+报错特征：
+
+```
+W: Unable to read /etc/apt/work/sources.list - RealFileExists (2: No such file or directory)
+E: Unable to locate package linux-image-amd64
+E: Unable to locate package xfce4
+...（所有包都 Unable to locate）
+```
+
+原因：`-o Dir::Etc::sourcelist=$WORK/sources.list` 收的是**绝对路径**；当 workflow 把 `WORK` 设成相对的 `work` 时，apt 把它解析成 `/etc/apt/work/sources.list`，读了个空源却不报错，直到 install 阶段才一口气报所有包找不到。
+
+已修：脚本 `cd "$WORK"` 后把 `WORK="$PWD"` 规范化；`sourceparts` 也改成真实的空目录而不是 `-`（消除 `/etc/apt/-/` 警告）；`apt update` 后加一道 `apt-cache policy linux-image-amd64` 的早失败检查，源没生效会立刻报出源内容，不再拖到 install 阶段。
+
 ## 7. 第一次跑最可能挂在哪（按概率排序）
 
 0. **内核和引导器必须显式进盘，但 grub 两个 flavor 不能一起求解。** d-i 的 `base-installer` 找 `linux-image-amd64`，`grub-installer` 按 BIOS/UEFI 分别找 `grub-pc`/`grub-efi-amd64`。trixie 里这两个包**互相 Conflicts**，写进同一个 `apt-get install` 会直接报 `held broken packages`（本次 CI 就挂在这里）。脚本现在把 `linux-image-amd64` 放主闭包，再对两个 flavor 各跑一次独立的 apt 求解，把 `.deb` 都收进 pool，由 `grub-installer` 运行时二选一。可用 `GRUB_FLAVORS` 只留一个。

@@ -66,6 +66,10 @@ die() { printf '\n\033[1;31m[FAIL] %s\033[0m\n' "$*" >&2; exit 1; }
 
 mkdir -p "$WORK"
 cd "$WORK"
+# apt 的 -o Dir::Etc::sourcelist=<path> 必须是绝对路径；给相对路径时它会
+# 按 /etc/apt/<path> 解析，报 "Unable to read /etc/apt/work/sources.list"
+# 然后把所有包都当成不存在。WORK 可能是 workflow 传入的 "work" 这种相对值。
+WORK="$PWD"
 
 # ---------- 0. 依赖 ----------
 log "0/8 安装构建工具"
@@ -174,8 +178,17 @@ APT_OPTS=(
   -o "APT::Install-Suggests=false"
 )
 printf 'deb %s %s %s\n' "$MIRROR" "$DIST" "$AREAS" > sources.list
-REPO_OPTS=(-o "Dir::Etc::sourcelist=$WORK/sources.list" -o "Dir::Etc::sourceparts=-")
-apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" update -qq
+# sourceparts 指向一个真实的空目录；用 "-" 会让 apt 每次都报
+# "Unable to read /etc/apt/-/ - DirectoryExists"。
+mkdir -p empty-sourceparts
+REPO_OPTS=(-o "Dir::Etc::sourcelist=$WORK/sources.list" \
+           -o "Dir::Etc::sourceparts=$WORK/empty-sourceparts")
+apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" update -qq \
+  || die "apt update 失败，检查 $WORK/sources.list 与网络"
+# 早失败：之前相对 WORK 会让 apt 静默读到空源，最后报一大串 Unable to locate package
+if ! apt-cache "${REPO_OPTS[@]}" policy linux-image-amd64 2>/dev/null | grep -q 'Candidate: [0-9]'; then
+  die "apt 源未生效（源内容: $(cat "$WORK/sources.list")）"
+fi
 # shellcheck disable=SC2086
 apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" install -y --download-only $PKGS $EXTRA_PKGS \
   > download.log 2>&1 || { tail -40 download.log; die "依赖解析失败，见 work/download.log"; }
