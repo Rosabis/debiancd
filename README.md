@@ -78,6 +78,8 @@ CD 团队在 [2025-08 的邮件](https://www.mail-archive.com/debian-cd@lists.de
 （若保留 NVIDIA +99 MB                      → 约 760~830 MB  ❌ 超了）
 ```
 
+实际第一版产物是 1,309 MiB，原因不是上面的估算错了，而是**脚本没执行"摘固件/initrd/去重"这三步**；补上后 predicted ≈ 656 MiB，详见 §6c。
+
 **实现**：`.github/workflows/build-xfce-gpu-fw.yml` 把两步串起来——
 
 1. `shrink-netinst.sh` 的 `FIRMWARE_KEEP` 只保留指定固件包，**把这些 deb 搬进 `pool/main/`** 再删掉整个 non-free-firmware 组件；
@@ -124,7 +126,7 @@ bullseye(2019) → trixie(13.x) 的映射已经断代：
 
 | 路线 | 产物 | 体积预期 | 复杂度 | CI 时长 | 备注 |
 |---|---|---|---|---|---|
-| **A. netinst 灌包**（`build-cd.yml`） | 安装 CD，BIOS+UEFI，离线可装 | 0.7–1.2 GB | 中 | 10–15 min | 和你的盘同构，索引要自己重建 |
+| **A. netinst 灌包**（`build-cd.yml`） | 安装 CD，BIOS+UEFI，离线可装 | 默认 ~0.65 GB；全固件/图形安装可达 1.3 GB | 中 | 10–15 min | 和你的盘同构，索引要自己重建 |
 | **B. live-build**（`build-live.yml`） | Live 桌面，内置安装器 | 0.6–0.9 GB | 低 | 15–30 min | 一条命令出图，最不容易翻车 |
 | C. debian-cd 全流程 | 官方同构，可做多盘 | 0.7–1.2 GB | 高 | 40–90 min | 需要本地 partial mirror |
 | D. simple-cdd | 同 C，封装版 | 同上 | 中 | 30–60 min | 上游久未大改，trixie 上要试 |
@@ -182,6 +184,29 @@ E: Unable to correct problems, you have held broken packages.
 原因：最初把 `linux-image-amd64 grub-pc grub-efi-amd64` 一起写进 `BASE_REQUIRED`，让 apt 在一次求解里同时选中互斥的两个引导器。修法见上一条。
 
 同时修掉一个**当时还没暴露、但装机时必然犯**的问题：原脚本用整份生成的 `Release` 覆盖顶层 `dists/<rel>/Release`，会把 `main/debian-installer/binary-amd64/Packages`（udeb 索引）、`SHA512`、`Components` 等条目一起抹掉，d-i 随后找不到组件或报 Hash Sum mismatch。现在改为只替换 `main/binary-amd64/Packages*` 对应的校验行。
+
+## 6c. 第二跑实测：产物 1,309 MiB，为什么是参照盘的 2 倍
+
+拿到实际产物 `debian-trixie-amd64-xfce-CD-1.iso` 后按文件清单逐项统计（1,555 个文件、合计 1,298 MiB）：
+
+| 来源 | 实测浪费 | 原因 |
+|---|---:|---|
+| **pool 重复 deb** | **180.6 MiB** | 176 个同名 deb 各存两份。netinst 原有 pool 按源码包分目录（`pool/main/l/linux-signed-amd64/`），脚本却按包名分（`pool/main/l/linux-image-6.12.../`），于是 `linux-image` 一份 103.5 MiB 就白存了两遍 |
+| **固件整包没摘** | **~312 MiB** | 跑的是 `build-cd.yml`，`AREAS=main` 只是**不新增**固件，并不会删掉 netinst 自带的 `/firmware` 与 `/pool/non-free-firmware`；重打包后两者不再是硬链接，各自实占 163.7 MiB |
+| **图形/Xen 安装器** | **~160 MiB** | `install.amd/gtk/initrd.gz` 73.4 + `install.amd/xen/initrd.gz` 63.6 + 两份多余 `vmlinuz` 23.2 |
+
+合计约 **653 MiB** —— 1,309 − 653 ≈ **656 MiB**，正好落回你那张 647 MiB 参照盘的量级。
+
+顺带发现一个隐藏问题：`gcc-14` / `linux-headers` 约 40 MiB **是官方 netinst 自带的**（`linux-headers-amd64 → linux-headers-6.12… → gcc-14`），不是桌面闭包带进来的，所以 slim 清单没背这个锅。
+
+已修（`remaster.sh`）：
+
+1. 第 4 步按 **basename（含版本+架构）去重**，pool 里已有同名 deb 就跳过下载副本；
+2. `STRIP_FIRMWARE=1`（默认开）直接删 `/firmware`、`/pool/non-free-firmware`、该组件的 Release 条目，`FIRMWARE_KEEP` 白名单固件搬进 `pool/main`；
+3. `DROP_EXTRA_INITRD=1`（默认开）删 `gtk`/`xen` initrd 并清理引导菜单条目；
+4. 固件包**不再进 apt 闭包**（`AREAS=main` 时 apt 根本找不到它们），只写进 preseed 的 `pkgsel/include`——这同时修掉了组合流水线第二次求解会报 "Unable to locate package firmware-amd-graphics" 的隐患。
+
+`build-xfce-gpu-fw.yml` 也简化成单步（自己调 `remaster.sh`），不再先跑 `shrink-netinst.sh`，避免重复解包与二次覆盖。
 
 ## 7. 第一次跑最可能挂在哪（按概率排序）
 

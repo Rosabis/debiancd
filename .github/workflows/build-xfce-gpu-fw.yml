@@ -1,7 +1,8 @@
 name: build-xfce-gpu-fw
 
-# 组合路线：trixie netinst → 只留一块显卡的固件 → 灌入 XFCE → 一张接近 bullseye 大小的盘
-# 目标：把 758 MB 里的 339 MB 全量固件砍到 8~16 MB（NVIDIA 例外 99 MB），再把 XFCE 塞进去
+# 组合路线（已简化为单步）：trixie netinst → 只留一块显卡的固件 → 灌入 XFCE → 小体积安装盘
+# 目标：把 758 MB 里的 324 MiB 全量固件砍到 8~16 MB（NVIDIA 例外 99 MB），
+#       同时去掉图形/Xen initrd（约 160 MiB）与 pool 重复 deb（约 180 MiB）。
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +19,10 @@ on:
       grub_flavors:
         description: "盘里放哪些 grub 引导器（空格分隔；只留一个可再省几 MiB）"
         default: "grub-pc grub-efi-amd64"
+      drop_extra_initrd:
+        description: "摘掉图形/Xen 安装器 initrd（约 160 MiB，仅文本安装）"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -46,40 +51,36 @@ jobs:
           echo "FIRMWARE_KEEP=$FW" >> "$GITHUB_ENV"
           echo "选中的固件：$FW"
 
-      - name: 1/2 裁掉其余固件
-        env:
-          DIST: ${{ inputs.dist }}
-          WORK: work-shrink
-          OUT: base.iso
-        run: bash scripts/shrink-netinst.sh
-
-      - name: 2/2 灌入 XFCE
+      - name: 构建 XFCE 小盘
         env:
           DIST: ${{ inputs.dist }}
           AREAS: main
           PROFILE: slim
-          WORK: work-xfce
-          OUT: debian-xfce-gpu.iso
+          INSTALL_RECOMMENDS: "no"
+          WORK: work
+          OUT: debian-trixie-amd64-xfce-CD-1.iso
           EXTRA_PKGS: ${{ inputs.extra_pkgs }}
           GRUB_FLAVORS: ${{ inputs.grub_flavors }}
-          BASE_ISO_OVERRIDE: ${{ github.workspace }}/work-shrink/base.iso
+          STRIP_FIRMWARE: "1"
+          DROP_EXTRA_INITRD: ${{ inputs.drop_extra_initrd && '1' || '0' }}
         run: bash scripts/remaster.sh
 
-      - name: 体积对比
+      - name: 摘要
         run: |
           {
-            echo "### 体积对比"
+            echo "### 产物"
             echo '```'
-            ls -lh work-shrink/base.iso work-xfce/*.iso 2>/dev/null || true
+            ls -lh work/*.iso work/*.sha256 2>/dev/null || true
             echo '```'
-            echo "gpu=${{ inputs.gpu }} firmware=\`$FIRMWARE_KEEP\`"
+            echo "gpu=${{ inputs.gpu }} firmware=\`$FIRMWARE_KEEP\` grub=\`${{ inputs.grub_flavors }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
           name: debian-xfce-${{ inputs.gpu }}-${{ inputs.dist }}
           path: |
-            work-xfce/*.iso
-            work-xfce/*.sha256
+            work/*.iso
+            work/*.sha256
+            work/selected-pkgs.txt
           compression-level: 0
           retention-days: 7

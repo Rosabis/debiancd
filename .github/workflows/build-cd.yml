@@ -29,6 +29,17 @@ on:
       grub_flavors:
         description: "把哪些 grub 引导器放进盘（空格分隔；两者互 Conflicts 故分开求解）"
         default: "grub-pc grub-efi-amd64"
+      strip_firmware:
+        description: "摘掉全量固件（只留 firmware_keep 里的，省约 310 MiB）"
+        type: boolean
+        default: true
+      firmware_keep:
+        description: "保留的固件包名，空格分隔（如 firmware-amd-graphics）"
+        default: ""
+      drop_extra_initrd:
+        description: "摘掉图形/Xen 安装器 initrd（省约 160 MiB，仅文本安装）"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -56,6 +67,9 @@ jobs:
           EXTRA_PKGS: ${{ inputs.extra_pkgs }}
           NETINST_VER: ${{ inputs.netinst_ver }}
           GRUB_FLAVORS: ${{ inputs.grub_flavors }}
+          STRIP_FIRMWARE: ${{ inputs.strip_firmware && '1' || '0' }}
+          FIRMWARE_KEEP: ${{ inputs.firmware_keep }}
+          DROP_EXTRA_INITRD: ${{ inputs.drop_extra_initrd && '1' || '0' }}
           PATCH_PRESEED: "1"
         run: bash scripts/remaster.sh
 

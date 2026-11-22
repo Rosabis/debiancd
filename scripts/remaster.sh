@@ -25,6 +25,10 @@ SIZE_LIMIT_MB="${SIZE_LIMIT_MB:-800}"  # CD-R 实际约 700 MiB，超过只是�
 WORK="${WORK:-$PWD/work}"
 OUT="${OUT:-debian-${DIST}-amd64-xfce-CD-1.iso}"
 EXTRA_PKGS="${EXTRA_PKGS:-}"
+# 默认就产出"小盘"：摘掉非显卡固件 + 图形/xen 安装器 initrd，并对 pool 去重。
+STRIP_FIRMWARE="${STRIP_FIRMWARE:-1}"        # 0 = 保留官方全量固件（体积 +~310 MiB）
+FIRMWARE_KEEP="${FIRMWARE_KEEP:-}"           # 保留的固件包名，空格分隔；会搬进 pool/main
+DROP_EXTRA_INITRD="${DROP_EXTRA_INITRD:-1}"  # 0 = 保留 gtk/xen 安装器（体积 +~160 MiB）
 
 # ---------- 两个 profile 的包清单 ----------
 # 注意：内核必须显式带上 —— d-i 的 base-installer 会从光盘里找 linux-image-amd64，
@@ -53,10 +57,9 @@ SLIM_PKGS="
 # task：官方等价 —— 直接把 tasksel 的 xfce 任务整包塞进盘里（体积大，但任务闭包完整）
 TASK_PKGS="$BASE_REQUIRED task-xfce-desktop"
 [ "$PROFILE" = "task" ] && PKGS="$TASK_PKGS" || PKGS="$SLIM_PKGS"
-# 从 shrink-netinst.sh 搬过来的固件包，确保写进 preseed 的 pkgsel/include，装完系统里真有
-if [ -n "${FIRMWARE_KEEP:-}" ]; then
-  PKGS="$PKGS $FIRMWARE_KEEP"
-fi
+# 固件包不进 apt 闭包：它们来自 non-free-firmware，AREAS=main 时 apt 根本找不到。
+# 它们已经被搬进 pool/main 并重建索引，只需写进 preseed 的 pkgsel/include 即可装上。
+PRESEED_EXTRA="$FIRMWARE_KEEP"
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31m[FAIL] %s\033[0m\n' "$*" >&2; exit 1; }
@@ -99,6 +102,68 @@ chmod -R u+w tree
 BASE_SIZE=$(du -sm tree | cut -f1)
 echo "    解包后 $(du -sh tree | cut -f1)（内核/initrd/固件/pool）"
 
+# ---------- 2b. 摘掉用不上的固件 ----------
+# 官方 netinst 把固件同时放在 /firmware 和 /pool/non-free-firmware（原盘是硬链接，
+# 但 xorriso 解包重打后会变成两份独立数据，实测白白多占 ~164 MiB）。这里整块拿掉，
+# 只把白名单里的显卡固件搬进 pool/main 当普通包索引。
+if [ "$STRIP_FIRMWARE" = "1" ]; then
+  FW_SAVED=$( { du -sm tree/firmware tree/pool/non-free-firmware 2>/dev/null || true; } | awk '{s+=$1} END{print s+0}')
+  if [ -n "$FIRMWARE_KEEP" ]; then
+    for fw in $FIRMWARE_KEEP; do
+      for deb in tree/firmware/${fw}_*.deb \
+                 tree/pool/non-free-firmware/f/firmware-nonfree/${fw}_*.deb; do
+        [ -f "$deb" ] || continue
+        base=$(basename "$deb")
+        install -D -m644 "$deb" "tree/pool/main/f/$fw/$base"
+      done
+    done
+    echo "    保留固件: $FIRMWARE_KEEP（已移入 pool/main）"
+  fi
+  rm -rf tree/firmware tree/pool/non-free-firmware "tree/dists/$DIST/non-free-firmware"
+  REL="tree/dists/$DIST/Release"
+  if [ -f "$REL" ]; then
+    sed -i '/non-free-firmware/d' "$REL"
+    sed -i -E 's/^(Components:).*$/Components: main/' "$REL"
+  fi
+  echo "main" > tree/.disk/base_components
+  echo "    已摘全量固件（约 ${FW_SAVED} MiB）"
+else
+  echo "    STRIP_FIRMWARE=0，保留官方全量固件"
+fi
+
+# ---------- 2c. 摘掉图形 / Xen 安装器 ----------
+# install.amd/gtk/initrd.gz 与 install.amd/xen/initrd.gz 各带一份 vmlinuz，
+# 合计约 160 MiB。文本安装足够把系统装起来，桌面是装完事。
+if [ "$DROP_EXTRA_INITRD" = "1" ]; then
+  EXTRA_SAVED=0
+  for d in gtk xen; do
+    if [ -d "tree/install.amd/$d" ]; then
+      m=$(du -sm "tree/install.amd/$d" | cut -f1)
+      EXTRA_SAVED=$((EXTRA_SAVED + m))
+      rm -rf "tree/install.amd/$d"
+    fi
+  done
+  for f in tree/isolinux/isolinux.cfg tree/boot/grub/grub.cfg \
+           tree/EFI/boot/grub.cfg tree/boot/grub/efi.cfg; do
+    [ -f "$f" ] || continue
+    if grep -qE 'install\.amd/(gtk|xen)/' "$f"; then
+      cp "$f" "$f.bak"
+      awk 'BEGIN{RS="";ORS="\n\n"} !/install\.amd\/(gtk|xen)\//' "$f.bak" > "$f"
+      if ! grep -q 'vmlinuz' "$f"; then
+        echo "    [warn] $f 过滤后无启动项，恢复"
+        mv "$f.bak" "$f"
+      else
+        rm -f "$f.bak"
+      fi
+    fi
+  done
+  sed -i -E 's/^(default[[:space:]]+)installgui/\1install/' \
+    tree/isolinux/isolinux.cfg 2>/dev/null || true
+  echo "    已摘图形/Xen 安装器（约 ${EXTRA_SAVED} MiB）"
+else
+  echo "    DROP_EXTRA_INITRD=0，保留图形/Xen 安装器"
+fi
+
 # ---------- 3. 让 apt 在目标发行版里算闭包并只下载 ----------
 log "3/8 解析并下载桌面依赖闭包（profile=$PROFILE, recommends=$INSTALL_RECOMMENDS）"
 rm -rf debs; mkdir -p debs
@@ -139,17 +204,30 @@ echo "    下载 $DEB_N 个 deb，共 ${DEB_MB} MiB"
 echo "$PKGS $EXTRA_PKGS $GRUB_FLAVORS" | tr -s ' \n' '\n' | grep -v '^$' | sort -u > selected-pkgs.txt
 
 # ---------- 4. 塞进 pool/ ----------
-log "4/8 复制 deb 到 tree/pool/main/"
+log "4/8 复制 deb 到 tree/pool/main/（按文件名去重）"
 mkdir -p tree/pool/main
+# 关键：netinst 的 pool 里本来就有大量 base 包（libc / perl / grub / kernel…）。
+# 我们的脚本用"<包名>"当 pool 子目录，与 Debian 按源码包分组的布局不同，
+# 原来的写法会把同一个 deb 再放一份（实测 176 个重复、180.6 MiB，其中内核一份就 103.5 MiB）。
+# 只要文件名（含版本+架构）相同就是同一份数据，直接跳过。
+( cd tree && find pool -type f -name '*.deb' -printf '%f\n' ) | sort -u > pool-existing.txt
+ADDED=0; SKIPPED=0
 for deb in debs/*.deb; do
   name=$(basename "$deb")
+  if grep -Fxq "$name" pool-existing.txt; then
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
   pkg=${name%%_*}
   case "$pkg" in
     lib*) letter=${pkg:0:4} ;;   # 遵循 Debian pool 布局：libfoo -> libf
     *)    letter=${pkg:0:1} ;;
   esac
   install -D -m644 "$deb" "tree/pool/main/$letter/$pkg/$name"
+  echo "$name" >> pool-existing.txt
+  ADDED=$((ADDED + 1))
 done
+echo "    新增 $ADDED 个 deb，跳过已存在 $SKIPPED 个"
 
 # ---------- 5. 重建索引 ----------
 log "5/8 重建 Packages / Release / md5sum.txt"
@@ -239,7 +317,7 @@ if [ "$PATCH_PRESEED" = "1" ]; then
     echo "# 由 remaster.sh 生成：让安装器只装这张盘上确实存在的包"
     echo "pkgsel/install-recommends boolean $([ "$INSTALL_RECOMMENDS" = yes ] && echo true || echo false)"
     echo "tasksel tasksel/first multiselect"
-    echo "pkgsel/include string $(echo $PKGS $EXTRA_PKGS | tr '\n' ' ')"
+    echo "pkgsel/include string $(echo $PKGS $EXTRA_PKGS $PRESEED_EXTRA | tr '\n' ' ')"
   } > tree/preseed.cfg
   for f in tree/isolinux/isolinux.cfg tree/boot/grub/grub.cfg; do
     [ -f "$f" ] || continue
