@@ -191,9 +191,12 @@ printf 'deb %s %s %s\n' "$MIRROR" "$DIST" "$AREAS" > sources.list
 mkdir -p empty-sourceparts
 REPO_OPTS=(-o "Dir::Etc::sourcelist=$WORK/sources.list" \
            -o "Dir::Etc::sourceparts=$WORK/empty-sourceparts")
-# exact profile：用参照盘解出的 998 个包名，在目标发行版里按"还存在的"取交集。
+# exact profile：用参照盘解出的包名，在目标发行版里按"还存在的"取交集。
 # 老盘是 2019 年的 bullseye alpha，包改名/删除很常见（libllvm9→11、python2.7 等），
 # 直接照抄会让 apt 报 Unable to locate package；这里先和当前 main 索引取交集。
+INSTALL_PKGS="$PKGS"     # 交给 apt 求闭包的一组根包（必须彼此不冲突）
+MANIFEST_PKGS=""         # exact：清单里的包，直接 apt-get download，不解析依赖
+TASK_SELECT=""           # exact：让 d-i 用 tasksel 装 xfce-desktop
 if [ "$PROFILE" = "exact" ]; then
   MANIFEST="${MANIFEST:-$REPO_ROOT/manifests/cd1-packages.tsv}"
   case "$MANIFEST" in /*) ;; *) MANIFEST="$REPO_ROOT/$MANIFEST" ;; esac
@@ -214,7 +217,16 @@ if [ "$PROFILE" = "exact" ]; then
   printf '    组件清单 %s 项 → 目标版可用 %s 项 / 已失效 %s 项\n' \
     "$(wc -l < manifest-names.txt)" "$(wc -l < exact-names.txt)" "$(wc -l < missing-names.txt)"
   head -15 missing-names.txt | sed 's/^/      失效: /'
-  PKGS="$BASE_REQUIRED $(tr '\n' ' ' < exact-names.txt)"
+
+  # 关键：参照盘是"安装媒介"，同一张盘上并存互斥的备选包——实测有
+  #   rdnssd Conflicts network-manager、grub-pc Conflicts grub-efi-amd64。
+  # 把 900+ 个包一次性交给 apt install 求"一个自洽系统"必然无解。
+  # 正确做法拆成两路：
+  #   A) 清单里的包用 apt-get download 直取（不解析依赖）→ 全部进 pool，忠于组件列表；
+  #   B) 另算一个自洽的 XFCE 任务闭包 → 保证装机时真能装上。
+  MANIFEST_PKGS="$(tr '\n' ' ' < exact-names.txt)"
+  INSTALL_PKGS="$BASE_REQUIRED task-xfce-desktop"
+  TASK_SELECT="xfce-desktop"
 fi
 
 apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" update -qq \
@@ -222,8 +234,26 @@ apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" update -qq \
 # 只打印诊断，不作阻断：apt-cache 在最小容器里的输出格式不稳定，
 # 之前用 policy 做 gate 会误杀正常流程；真正的解析失败由下面的 install 给出明确报错。
 echo "    apt 源: $(cat "$WORK/sources.list")"
+if [ -n "$MANIFEST_PKGS" ]; then
+  # A) 媒介清单直取：apt-get download 不做依赖解析，所以 rdnssd/network-manager
+  #    这类"同盘并存但互斥"的包都能拿到。下载到 debs/，后面统一去重进 pool。
+  # shellcheck disable=SC2086
+  if ! ( cd debs && apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" download $MANIFEST_PKGS ) \
+        > download-manifest.log 2>&1; then
+    echo "    [warn] 清单批量直取有失败项，改为逐个重试并跳过不可用项"
+    : > download-manifest-failed.txt
+    for p in $MANIFEST_PKGS; do
+      # shellcheck disable=SC2086
+      ( cd debs && apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" download "$p" ) \
+        >> download-manifest.log 2>&1 || echo "$p" >> download-manifest-failed.txt
+    done
+    echo "    最终无法直取 $(wc -l < download-manifest-failed.txt) 项（见 work/download-manifest-failed.txt）"
+  fi
+  echo "    清单直取后 debs/: $(find debs -maxdepth 1 -name '*.deb' | wc -l) 个 deb"
+fi
+# B) 自洽闭包：只解一组根包，避开媒介里并存的冲突备选包。
 # shellcheck disable=SC2086
-apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" install -y --download-only $PKGS $EXTRA_PKGS \
+apt-get "${REPO_OPTS[@]}" "${APT_OPTS[@]}" install -y --download-only $INSTALL_PKGS $EXTRA_PKGS \
   > download.log 2>&1 || { tail -40 download.log; die "依赖解析失败，见 work/download.log"; }
 
 # 引导器：两个 flavor 各自独立求解，避开 grub-pc <-> grub-efi-amd64 的 Conflicts。
@@ -247,7 +277,14 @@ DEB_N=$(find debs -maxdepth 1 -name '*.deb' | wc -l)
 DEB_MB=$(du -sm debs | cut -f1)
 [ "$DEB_N" -gt 0 ] || die "没有下载到任何 deb"
 echo "    下载 $DEB_N 个 deb，共 ${DEB_MB} MiB"
-echo "$PKGS $EXTRA_PKGS $GRUB_FLAVORS" | tr -s ' \n' '\n' | grep -v '^$' | sort -u > selected-pkgs.txt
+{
+  echo "# 闭包根包（apt install + preseed）"
+  echo "$INSTALL_PKGS $EXTRA_PKGS $GRUB_FLAVORS" | tr -s ' \n' '\n' | grep -v '^$' | sort -u
+  if [ -n "$MANIFEST_PKGS" ]; then
+    echo "# 媒介清单（apt-get download 直取，不参与依赖求解）"
+    echo "$MANIFEST_PKGS" | tr -s ' \n' '\n' | grep -v '^$' | sort -u
+  fi
+} > selected-pkgs.txt
 
 # ---------- 4. 塞进 pool/ ----------
 log "4/8 复制 deb 到 tree/pool/main/（按文件名去重）"
@@ -358,12 +395,22 @@ echo "full_cd/single" > tree/.disk/cd_type
 echo "main" > tree/.disk/base_components
 
 if [ "$PATCH_PRESEED" = "1" ]; then
-  log "6b preseed：跳过 tasksel，按 pkgsel/include 装本盘携带的包"
+  log "6b preseed：让安装器只装这张盘上确实存在的包"
+  if [ -n "$TASK_SELECT" ]; then
+    # exact：照参照盘的行为用 tasksel 选 xfce-desktop；pkgsel/include 只放固件。
+    # 绝不能把 900+ 个媒介包（含互斥备选）写进 pkgsel/include，否则装机时
+    # 会在 d-i 里重现同一个 "held broken packages"。
+    PRESEED_INCLUDE="$PRESEED_EXTRA $EXTRA_PKGS"
+    TASK_LINE="tasksel tasksel/first multiselect $TASK_SELECT"
+  else
+    PRESEED_INCLUDE="$PKGS $EXTRA_PKGS $PRESEED_EXTRA"
+    TASK_LINE="tasksel tasksel/first multiselect"
+  fi
   {
     echo "# 由 remaster.sh 生成：让安装器只装这张盘上确实存在的包"
     echo "pkgsel/install-recommends boolean $([ "$INSTALL_RECOMMENDS" = yes ] && echo true || echo false)"
-    echo "tasksel tasksel/first multiselect"
-    echo "pkgsel/include string $(echo $PKGS $EXTRA_PKGS $PRESEED_EXTRA | tr '\n' ' ')"
+    echo "$TASK_LINE"
+    echo "pkgsel/include string $(echo $PRESEED_INCLUDE | tr '\n' ' ')"
   } > tree/preseed.cfg
   for f in tree/isolinux/isolinux.cfg tree/boot/grub/grub.cfg; do
     [ -f "$f" ] || continue

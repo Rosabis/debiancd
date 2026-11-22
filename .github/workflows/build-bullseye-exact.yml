@@ -67,8 +67,14 @@ jobs:
             ls -lh work/debian-bullseye-amd64-xfce-CD-1.iso* 2>/dev/null || true
             echo '```'
             echo "manifest=\`${{ inputs.manifest }}\` recommends=\`${{ inputs.recommends }}\`"
+            echo ""
+            echo "媒介清单用 apt-get download 直取（不解析依赖，所以 rdnssd/network-manager 这类同盘互斥包不会冲突）；"
+            echo "安装闭包只解 task-xfce-desktop，preseed 用 tasksel 选 xfce-desktop。"
             echo '```'
+            echo "--- 已失效的包名（对照 Packages 索引取交集后剔除） ---"
             cat work/missing-names.txt 2>/dev/null || true
+            echo "--- 最终无法直取的包 ---"
+            cat work/download-manifest-failed.txt 2>/dev/null || echo "(无)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -80,6 +86,7 @@ jobs:
             work/debian-bullseye-amd64-xfce-CD-1.iso.sha256
             work/selected-pkgs.txt
             work/missing-names.txt
+            work/download-manifest-failed.txt
             work/tree/dists/**/Packages
           compression-level: 0
           retention-days: 7

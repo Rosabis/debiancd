@@ -229,8 +229,9 @@ E: Unable to locate package xfce4
 新增 `.github/workflows/build-bullseye-exact.yml`：目标和那张 2019 年 alpha1 盘**组件列表完全一样**，但用正式版 bullseye 11.11.0 的包。
 
 - 基座：官方归档镜像 `https://cdimage.debian.org/cdimage/archive/11.11.0/amd64/iso-cd/debian-11.11.0-amd64-netinst.iso`（当前 `current/` 已无 bullseye，只有 `archive/`）；`remaster.sh` 新增 `NETINST_URL` 直接指定。
-- 组件：`PROFILE=exact` 读 `manifests/cd1-packages.tsv` 的 998 个包名。2019 → 11.11.0 之间必然有改名/删除（`libllvm9→11`、`gcc-9→10`、`libicu63→67`、`python2.7` 等），脚本先和当前 `bullseye/main` 的 `Packages` 取交集，把失效项写进 `work/missing-names.txt` 并打印，再用剩余包名让 apt 算闭包——不会像"照抄包名"那样整批 `Unable to locate package`。
-- 若 998 项里有解析不出来的组合，可把 `manifest` 输入改成 `manifests/cd1-roots.txt`（59 个根包）退到更稳的闭包。
+- 组件：`PROFILE=exact` 读 `manifests/cd1-packages.tsv` 的 998 个包名。2019 → 11.11.0 之间必然有改名/删除（`libllvm9→11`、`gcc-9→10`、`libicu63→67`、`python2.7` 等），脚本先和当前 `bullseye/main` 的 `Packages` 取交集，把失效项写进 `work/missing-names.txt` 并打印。
+- **媒介清单 ≠ 单机安装清单**。参照盘是安装媒介，同一张盘并存互斥备选包（实测 `rdnssd Conflicts network-manager`）；把 928 个包一次性交给 `apt-get install` 必然 `held broken packages`。现在拆成两路：清单里的包用 `apt-get download` **直取**（不解析依赖）全部进 pool；另外只对 `$BASE_REQUIRED task-xfce-desktop` 求一个自洽闭包，preseed 用 `tasksel tasksel/first multiselect xfce-desktop` 装机。batch 直取若有失败项会自动逐个重试并把最终失败项写到 `work/download-manifest-failed.txt`。
+- 若想更保守，可把 `manifest` 输入改成 `manifests/cd1-roots.txt`（59 个根包），让清单直取量更小。
 - 保持参照盘特征：`AREAS=main`、`INSTALL_RECOMMENDS=yes`、保留图形安装器 initrd、不动固件组件。产物 `debian-bullseye-amd64-xfce-CD-1.iso`，预计 **650–750 MiB**（正式版内核/浏览器比 2019 alpha 大，不保证刚好 647）。
 - 上传 artifact 现在只列**具体产物文件名**，不再用 `work/*.iso` 通配，所以基座 `debian-13.8.0-amd64-netinst.iso`（或 11.11.0）不会占 artifact 体积。`build-cd.yml` / `build-xfce-gpu-fw.yml` 也已同样处理。
 
@@ -243,7 +244,8 @@ E: Unable to locate package xfce4
 4. **`dists/<rel>/main/debian-installer/binary-amd64/`** 必须原样保留（udeb 索引），删了安装器找不到组件。
 5. **`.disk/cd_type`** 必须是 `full_cd/single`，否则 `apt-setup` 装完 base 仍然要求联网。
 6. **固件**：只留 `main` 时不带无线网卡固件，笔记本装完可能没网。要就 `AREAS="main contrib non-free-firmware"`，代价 +100~200 MiB。
-7. **Actions 资源**：容器 `debian:trixie`，磁盘 14 GB 够用；1 GB 级 artifact 单文件在 2 GB 限制内。首次跑建议 `profile=slim, recommends=no, areas=main` 先拿一个能启动的产物，再逐项加。
+7. **同盘互斥包**（路线 E 专属）：`rdnssd : Conflicts: network-manager` 曾让 928 项一次性求解失败。已按上节拆成"清单直取 + 任务闭包"两路；`pkgsel/include` 里现在只有固件和 `EXTRA_PKGS`，不再塞媒介清单。
+8. **Actions 资源**：容器 `debian:trixie`，磁盘 14 GB 够用；1 GB 级 artifact 单文件在 2 GB 限制内。首次跑建议 `profile=slim, recommends=no, areas=main` 先拿一个能启动的产物，再逐项加。
 
 ---
 
