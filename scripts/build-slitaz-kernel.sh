@@ -262,7 +262,12 @@ sed -i "2i PACKED_SIZE=\"$PACKED\"\nUNPACKED_SIZE=\"$UNPACKED\"" "$PKGDIR/receip
 log "Wrapping final .tazpkg"
 TAZPKG_NAME="${PKG}-${VERSION}.tazpkg"
 ( cd "$PKGDIR" && find . -print | cpio -o -H newc --quiet ) > "$WORK/$TAZPKG_NAME"
-sha256sum "$WORK/$TAZPKG_NAME" | awk '{print $1}' > "$WORK/$TAZPKG_NAME.sha256"
+# sha256sum -c needs the standard "<hash>  <filename>" format with a filename
+# that resolves from $WORK (where the verify step cds to). Running it inside
+# $WORK with the bare name produces exactly that; `awk '{print $1}'` here
+# would emit only the hash and make `sha256sum -c` report "no properly
+# formatted checksum lines".
+( cd "$WORK" && sha256sum "$TAZPKG_NAME" > "$TAZPKG_NAME.sha256" )
 
 log "DONE"
 ls -lh "$WORK/$TAZPKG_NAME" "$WORK/$TAZPKG_NAME.sha256"
