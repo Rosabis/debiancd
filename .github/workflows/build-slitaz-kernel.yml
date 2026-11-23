@@ -1,0 +1,130 @@
+name: build-slitaz-kernel
+
+# 用 GitHub Actions 从 kernel.org 源码编译 SliTaz 风格的内核 .tazpkg。
+# 目标：3.16 系列最终版 3.16.85，i486 + x86_64 双架构，先做主 linux 包。
+# 不依赖 SliTaz 宿主/cookutils/uclibc 交叉工具链——用原生 gcc + SliTaz
+# 官方 .config 与补丁，按 tazpkg 格式（newc cpio 套 fs.cpio.lzma）打包。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "内核版本（3.16 系列最新稳定版 = 3.16.85）"
+        default: "3.16.85"
+      arch:
+        description: "构建哪个架构（both = 两个都出）"
+        type: choice
+        options: [both, i486, amd64]
+        default: both
+      apply_patches:
+        description: "是否套用 SliTaz 官方内核补丁（freeinitrd/subroot/romfs/efi 等）"
+        type: boolean
+        default: true
+      jobs:
+        description: "并行编译线程数（留空 = 取 runner 核数）"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # 用 inputs 动态生成 matrix：matrix 上下文不能用于 job 级 if，
+  # 所以先由一个轻量 job 算出要构建的架构列表。
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          case "${{ inputs.arch }}" in
+            i486)  M='{"include":[{"arch":"i486","pkg":"linux"}]}' ;;
+            amd64) M='{"include":[{"arch":"amd64","pkg":"linux64"}]}' ;;
+            *)     M='{"include":[{"arch":"i486","pkg":"linux"},{"arch":"amd64","pkg":"linux64"}]}' ;;
+          esac
+          echo "matrix=$M" >> "$GITHUB_OUTPUT"
+          echo "matrix = $M"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: 准备容器（git + 构建工具链）
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            git ca-certificates curl xz-utils cpio kmod bc \
+            build-essential flex bison libncurses-dev libssl-dev \
+            libelf-dev patch
+          # i486 目标需要 32 位工具链（native gcc -m32）
+          if [ "${{ matrix.arch }}" = "i486" ]; then
+            apt-get install -y -qq --no-install-recommends gcc-multilib
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: 显示编译器与架构
+        run: |
+          gcc --version | head -1
+          echo "target arch = ${{ matrix.arch }}"
+          nproc
+
+      - name: 编译并打包内核 .tazpkg
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ inputs.version }}
+          APPLY_PATCHES: ${{ inputs.apply_patches && '1' || '0' }}
+          JOBS: ${{ inputs.jobs }}
+          OUTDIR: work
+        run: bash scripts/build-slitaz-kernel.sh
+
+      - name: 校验产物结构
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -e
+          PKG="$([ "$ARCH" = i486 ] && echo linux || echo linux64)"
+          F="work/$ARCH/${PKG}-${VERSION}.tazpkg"
+          echo "产物: $F"
+          ls -lh "$F"
+          # 外层必须是 newc cpio：前 6 字节 ASCII "070701"
+          magic=$(od -An -tx1 -N6 "$F" | tr -d ' \n')
+          echo "cpio magic = $magic"
+          [ "$magic" = "303730373031" ] || { echo "ERROR: 不是 newc cpio"; exit 1; }
+          # 校验 sha256
+          ( cd "work/$ARCH" && sha256sum -c "${PKG}-${VERSION}.tazpkg.sha256" )
+          echo "OK: 产物结构与校验通过"
+
+      - name: 摘要
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          PKG="$([ "$ARCH" = i486 ] && echo linux || echo linux64)"
+          {
+            echo "### 产物：SliTaz ${VERSION} 内核（${ARCH}）"
+            echo '```'
+            ls -lh work/$ARCH/${PKG}-${VERSION}.tazpkg*
+            echo '```'
+            echo "内核版本：\`${VERSION}\`　架构：\`${ARCH}\`　包：\`${PKG}\`"
+            echo ""
+            echo "补丁失败项（若有，多为 3.16.53→${VERSION} 的行号漂移，已用 fuzz 容忍）："
+            echo '```'
+            cat work/$ARCH/patch-failures.txt 2>/dev/null || echo "(无)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slitaz-kernel-${{ matrix.arch }}-${{ inputs.version }}
+          path: |
+            work/${{ matrix.arch }}/linux*-${{ inputs.version }}.tazpkg
+            work/${{ matrix.arch }}/linux*-${{ inputs.version }}.tazpkg.sha256
+          compression-level: 0
+          retention-days: 7
