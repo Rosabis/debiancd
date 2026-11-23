@@ -234,6 +234,7 @@ E: Unable to locate package xfce4
 - 若想更保守，可把 `manifest` 输入改成 `manifests/cd1-roots.txt`（59 个根包），让清单直取量更小。
 - 保持参照盘特征：`AREAS=main`、`INSTALL_RECOMMENDS=yes`、保留图形安装器 initrd、不动固件组件。产物 `debian-bullseye-amd64-xfce-CD-1.iso`，预计 **650–750 MiB**（正式版内核/浏览器比 2019 alpha 大，不保证刚好 647）。
 - 上传 artifact 现在只列**具体产物文件名**，不再用 `work/*.iso` 通配，所以基座 `debian-13.8.0-amd64-netinst.iso`（或 11.11.0）不会占 artifact 体积。`build-cd.yml` / `build-xfce-gpu-fw.yml` 也已同样处理。
+- **首版产物 1,128 MiB 的体积事故（已修）**：实测 pool 1,713 包 / 970 MiB（参照盘 998 包 / 510 MiB），install.amd 124 MiB（参照 73.7）。根因是我把 `INSTALL_PKGS` 设成 `task-xfce-desktop` 且 `INSTALL_RECOMMENDS=yes`：该元包 `Recommends` 明列 `libreoffice-writer/calc/impress` 等，把**参照盘清单根本没有**的 728 个包（约 503 MiB）拉进 pool——libreoffice 全家 80 MiB、pocketsphinx 23、webkit 18、gimp-data 16、gcc-10 16、libllvm11 17 等。修法：exact 的安装闭包只留 `linux-image-amd64`（内核/引导器仍需显式），桌面包全部由 928 项清单直取；preseed 对 exact 强制 `pkgsel/install-recommends false`，避免装机时联网补 libreoffice。预期回到 ~650–750 MiB。
 
 ## 7. 第一次跑最可能挂在哪（按概率排序）
 

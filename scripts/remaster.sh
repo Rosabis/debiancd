@@ -223,9 +223,12 @@ if [ "$PROFILE" = "exact" ]; then
   # 把 900+ 个包一次性交给 apt install 求"一个自洽系统"必然无解。
   # 正确做法拆成两路：
   #   A) 清单里的包用 apt-get download 直取（不解析依赖）→ 全部进 pool，忠于组件列表；
-  #   B) 另算一个自洽的 XFCE 任务闭包 → 保证装机时真能装上。
+  #   B) 内核元包单独下载即可。绝不能用 task-xfce-desktop 求闭包：
+  #      它在 bullseye 里 task-xfce-desktop -> task-desktop -> Recommends 会拉进
+  #      libreoffice(80MiB)/gimp/pocketsphinx/webkit/gcc-10/libllvm11 等一大堆
+  #      参照盘根本没有的包（实测 pool 从 510 膨胀到 970 MiB）。
   MANIFEST_PKGS="$(tr '\n' ' ' < exact-names.txt)"
-  INSTALL_PKGS="$BASE_REQUIRED task-xfce-desktop"
+  INSTALL_PKGS="$BASE_REQUIRED"
   TASK_SELECT="xfce-desktop"
 fi
 
@@ -406,9 +409,14 @@ if [ "$PATCH_PRESEED" = "1" ]; then
     PRESEED_INCLUDE="$PKGS $EXTRA_PKGS $PRESEED_EXTRA"
     TASK_LINE="tasksel tasksel/first multiselect"
   fi
+  # exact：11.11.0 的 task-xfce-desktop 推荐 libreoffice/gimp 等参照盘没有的包。
+  # 这些包不在盘上，若允许 recommends，装机时会转去联网拉取（离线安装失败）。
+  # 参照盘的 2019 alpha 任务元包不带这些推荐，所以这里强制关掉以忠实复刻。
+  local_recs="$INSTALL_RECOMMENDS"
+  [ -n "$TASK_SELECT" ] && local_recs="no"
   {
     echo "# 由 remaster.sh 生成：让安装器只装这张盘上确实存在的包"
-    echo "pkgsel/install-recommends boolean $([ "$INSTALL_RECOMMENDS" = yes ] && echo true || echo false)"
+    echo "pkgsel/install-recommends boolean $([ "$local_recs" = yes ] && echo true || echo false)"
     echo "$TASK_LINE"
     echo "pkgsel/include string $(echo $PRESEED_INCLUDE | tr '\n' ' ')"
   } > tree/preseed.cfg
