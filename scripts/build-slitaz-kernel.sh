@@ -121,13 +121,20 @@ echo "Config: $(grep -E '^CONFIG_(LOCALVERSION|64BIT|X86_32|CROSS_COMPILE)=' .co
 
 # --- 4. Build bzImage + modules --------------------------------------------
 log "Building bzImage + modules (ARCH=$KARCH, JOBS=$JOBS)"
-# Modern gcc compatibility: 3.16 predates -fno-common default and strict
-# pointer checks; relax those so the old tree compiles on gcc 11/12/13.
+# Modern gcc compatibility: 3.16 predates the -fno-common default and strict
+# pointer checks; relax those so the old tree compiles on gcc 10/11/12/13.
 KCFLAGS="-fcommon -Wno-error=incompatible-pointer-types -Wno-error=array-bounds ${EXTRA_KCFLAGS}"
 
-make ARCH="$KARCH" $CROSS KCFLAGS="$KCFLAGS" -j"$JOBS" bzImage \
+# Host tools (arch/x86/tools/relocs, scripts/mod/modpost) are compiled with
+# HOSTCFLAGS, NOT KCFLAGS. GCC 10+ defaults to -fno-common, which makes the
+# tentative `per_cpu_load_addr` in relocs_32.o and relocs_64.o both strong
+# symbols -> `multiple definition` at HOSTLD. Restore -fcommon for host builds
+# too, while preserving the kernel's default host flags.
+HOSTCFLAGS="-Wall -Wmissing-prototypes -Wstrict-prototypes -O2 -fomit-frame-pointer -fcommon"
+
+make ARCH="$KARCH" $CROSS KCFLAGS="$KCFLAGS" HOSTCFLAGS="$HOSTCFLAGS" -j"$JOBS" bzImage \
   > "$WORK/build-bzimage.log" 2>&1 || { tail -60 "$WORK/build-bzimage.log"; die "bzImage build failed"; }
-make ARCH="$KARCH" $CROSS KCFLAGS="$KCFLAGS" -j"$JOBS" modules \
+make ARCH="$KARCH" $CROSS KCFLAGS="$KCFLAGS" HOSTCFLAGS="$HOSTCFLAGS" -j"$JOBS" modules \
   > "$WORK/build-modules.log" 2>&1 || { tail -60 "$WORK/build-modules.log"; die "modules build failed"; }
 echo "bzImage: $(ls -lh arch/x86/boot/bzImage | awk '{print $5}')"
 
