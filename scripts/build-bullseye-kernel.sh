@@ -4,9 +4,11 @@
 # 思路：
 #   1. 从 snapshot.debian.org 拉 Debian 官方源码包（dsc + orig + debian tarball）
 #   2. 把 amd64 收敛成唯一 flavour（去掉 cloud-amd64），只编一个 flavour
-#   3. DEBIAN_KERNEL_DISABLE_DEBUG=1 关掉几百 MB 的 -dbg 包
-#      —— vmlinuz 的 objcopy --strip-debug 和模块的 INSTALL_MOD_STRIP=1
-#         是 Debian 打包规则无条件做的，所以 image 包天然就是 stripped 的
+#   3. 在 amd64/defines 里 debug-info: false 关掉几百 MB 的 -dbg 包
+#      —— 不能用 DEBIAN_KERNEL_DISABLE_DEBUG=1：gencontrol.py 只允许在
+#         UNRELEASED 构建里用这个 env，release 构建会直接抛 RuntimeError。
+#      vmlinuz 的 objcopy --strip-debug 和模块的 INSTALL_MOD_STRIP=1
+#      是 Debian 打包规则无条件做的，所以 image 包天然就是 stripped 的
 #   4. 同源构建 linux-headers 三件套（arch headers + common headers + kbuild），
 #      否则第三方模块（DKMS/VirtualBox/NVIDIA/ZFS）的 Module.symvers CRC 可能与
 #      这个内核对不上，编出来的模块加载失败。headers 必须与 image 同版本同源码。
@@ -44,13 +46,9 @@ HDR_COMMON="linux-headers-${ABI}-common_${SRCVER}_all.deb"
 HDR_KBUILD="linux-kbuild-${KBUILD_VER}_${SRCVER}_amd64.deb"
 BASE="https://snapshot.debian.org/archive/debian-security/${SNAPSHOT}/pool/updates/main/l/linux"
 
-# 这些开关必须在 debian/control 生成之前就生效：gencontrol.py 在那一刻决定
-# 是否生成 -dbg 包、是否把镜像包命名为 -unsigned。
-#   DISABLE_SIGNED=1 -> 产出 linux-image-<ABI>-amd64（官方名字），而不是 -unsigned；
-#                       签名版本来由单独的 linux-signed-amd64 源码包生成，这里用不上。
-#   DISABLE_DEBUG=1  -> 不生成几百 MB 的 linux-image-*-dbg。
-export DEBIAN_KERNEL_DISABLE_SIGNED=1
-export DEBIAN_KERNEL_DISABLE_DEBUG=1
+# 这两个 env 开关不能在这里 export：gencontrol.py 只允许 distribution=UNRELEASED
+# 时用 DEBIAN_KERNEL_DISABLE_*，release 构建会硬报错。"signed-code: false" 和
+# "debug-info: false" 直接写进 amd64/defines，效果一样且不受 distribution 限制。
 export DEBIAN_KERNEL_JOBS="$JOBS"
 export DEB_BUILD_PROFILES="nodoc pkg.linux.nosource noudeb pkg.linux.nometa pkg.linux.mintools"
 
@@ -153,6 +151,9 @@ image-file: arch/x86/boot/bzImage
 # 关键：必须为 false，否则 gencontrol.py 会选 control.image-unsigned 模板，
 # 产物叫 linux-image-<ABI>-amd64-unsigned，拿不到"官方源那种"包名。
 signed-code: false
+# 关掉 linux-image-*-dbg（几百 MB）。不能用 DEBIAN_KERNEL_DISABLE_DEBUG=1，
+# release 构建会被 gencontrol.py 拒绝；改 config 是官方允许的写法。
+debug-info: false
 vdso: true
 
 [image]
@@ -180,7 +181,8 @@ rm -f "$SRCDIR/debian/control.md5sum"
 test -s "$SRCDIR/debian/control" || { echo "ERROR: debian/control 生成失败"; exit 1; }
 
 say "编译 amd64 flavour"
-# DEBIAN_KERNEL_DISABLE_DEBUG=1 -> 不生成 linux-image-*-dbg（否则多几百 MB）
+# amd64/defines 的 debug-info: false / signed-code: false 已在上面写入，
+# control 重生成后就不会有 -dbg 和 -unsigned 包。
 # -d 跳过 build-dep 检查（依赖已在 workflow 里手动装好）
 # -b（不是 -B）：common headers 是 Architecture: all，只有 -b 才会产出。
 #   build profiles 把不需要的 indep 包挡掉：
