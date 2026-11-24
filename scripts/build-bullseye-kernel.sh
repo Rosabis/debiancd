@@ -99,15 +99,17 @@ fi
 if [ -n "$UPSTREAM_TARGET" ] && [ "$UPSTREAM_TARGET" != "$UPSTREAM" ]; then
   say "嫁接上游：${UPSTREAM} -> ${UPSTREAM_TARGET}（kernel.org 增量补丁链）"
   # 为什么用增量而不是整包替换：Debian 的 102 个补丁 + 配置已经套在 5.10.262
-  # 源码树上，逐个叠加 kernel.org 的 262→263→…→274 增量补丁，Debian 打包层
-  # 完全不动，冲突面最小（上游 stable 只改少量代码，且这些补丁多为 Xen 修复）。
+  # 源码树上，逐个叠加 kernel.org 的 262→263→…→275 增量补丁，Debian 打包层
+  # 完全不动，冲突面最小（上游 stable 只改少量代码）。
   INCR="https://cdn.kernel.org/pub/linux/kernel/v5.x/incr"
   cur="$UPSTREAM"
   : > "$WORK/upstream-patch-log.txt"
   while [ "$cur" != "$UPSTREAM_TARGET" ]; do
     n="${cur##*.}"                       # 262
-    next="${cur%.*}.$((n + 1))"          # 5.10.263
-    pf="patch-${cur}-${next}.xz"
+    next="${cur%.*}.$((n + 1))"          # 5.10.263（用于循环和 changelog）
+    # kernel.org 的增量文件名后半段只写修订号：patch-5.10.262-263.xz，
+    # 不是 patch-5.10.262-5.10.263.xz —— 之前这里拼错导致 404。
+    pf="patch-${cur}-${next##*.}.xz"
     if [ ! -s "$pf" ]; then
       curl -fsSL --retry 3 --retry-delay 2 -o "$pf" "${INCR}/${pf}"
     fi
@@ -115,7 +117,7 @@ if [ -n "$UPSTREAM_TARGET" ] && [ "$UPSTREAM_TARGET" != "$UPSTREAM" ]; then
     if xz -dc "$pf" | ( cd "$SRCDIR" && patch -p1 --forward --batch --fuzz=2 ); then
       echo " OK"
     else
-      echo " 检查上游-patch-log.txt（可能已由 Debian 补丁 backport 同一修复）"
+      echo " 检查 upstream-patch-log.txt（可能已由 Debian 补丁 backport 同一修复）"
     fi
     xz -dc "$pf" | grep -E '^--- |^\+\+\+ ' >> "$WORK/upstream-patch-log.txt" || true
     cur="$next"
