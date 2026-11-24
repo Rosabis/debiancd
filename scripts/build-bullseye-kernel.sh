@@ -132,7 +132,11 @@ if [ -n "$UPSTREAM_TARGET" ] && [ "$UPSTREAM_TARGET" != "$UPSTREAM" ]; then
   rm -f "$SRCDIR/debian/control.md5sum"
 fi
 
-say "收敛 flavour：amd64 none 设为唯一 flavour"
+say "收敛 flavour：全局去掉 rt featureset，amd64 none 设为唯一 flavour"
+# 必须同时改全局 debian/config/defines：binary-indep_rt / build-indep_rt 是从
+# 全局 featuresets 生成的，只改 amd64/defines 挡不住 RT 那套补丁被应用。
+# RT 补丁（0029-highmem-... 等）在 5.10.275 上游代码上会打不上，直接失败。
+sed -i '/^featuresets:/,/^$/ { /^ rt$/d; }' "$SRCDIR/debian/config/defines"
 # 原文件是 flavours: amd64 + cloud-amd64，quick-flavour 是 cloud-amd64；
 # 另外 amd64/defines 还挂了 rt featureset（会多编一遍完整 RT 内核）。
 # 只留 none/amd64，省掉 cloud 和 rt 两遍完整编译，拿到的正是官方通用 amd64 包。
