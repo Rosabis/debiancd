@@ -51,6 +51,11 @@ printf '  version  = %s\n  upstream = %s\n  abi      = %s\n  snapshot = %s\n  mo
   "$VERSION" "$UPSTREAM" "$ABI" "$SNAPSHOT" "$MODE" "$HEADERS" "$JOBS"
 
 mkdir -p "$WORK" "$OUT"
+# 关键：改用绝对路径。之前 SRCDIR 是相对的 "work/kernel/linux-..."，而下面又
+# cd 进了 "$WORK"，dpkg-source 的目标目录被拼成 work/kernel/work/kernel/...，
+# 连带 orig tarball 的复制目标也算错，报 "cannot copy ... No such file"。
+WORK="$(cd "$WORK" && pwd)"
+OUT="$(cd "$OUT" && pwd)"
 SRCDIR="$WORK/linux-${UPSTREAM}"
 cd "$WORK"
 
@@ -62,9 +67,25 @@ for f in "linux_${UPSTREAM}.orig.tar.xz" "linux_${VERSION}.debian.tar.xz" "linux
   printf '  %-46s %s\n' "$f" "$(du -h "$f" | cut -f1)"
 done
 
-say "解压源码（dpkg-source 会校验 dsc 里的 SHA256）"
+say "校验 dsc 中的 SHA256 并解压源码"
+# 自己校验 checksum，再用 --no-check 让 dpkg-source 别去跑 gpgv：
+# bullseye-slim 的 gpgv 不认 trustedkeys.kbx，日志会刷 "No public key" 警告。
+# 签名警告本来不致命，但去掉后 CI 日志干净，完整性校验也一点没少。
+awk '
+  /^Checksums-Sha256:/ { in_sec=1; next }
+  /^[^[:space:]]/       { in_sec=0 }
+  in_sec && NF==3 && length($1)==64 && $1 ~ /^[0-9a-f]+$/ { print $1 "  " $3 }
+' "$WORK/linux_${VERSION}.dsc" > "$WORK/.sha256-check"
+test -s "$WORK/.sha256-check" || { echo "ERROR: 没从 dsc 解析出 SHA256"; exit 1; }
+( cd "$WORK" && sha256sum -c .sha256-check )
+rm -f "$WORK/.sha256-check"
+# 上次失败可能留下半截目录；只有完整解出的树才算可复用。
+if [ -d "$SRCDIR" ] && [ ! -f "$SRCDIR/debian/rules" ]; then
+  echo "清理上次残留的不完整源码树：$SRCDIR"
+  rm -rf "$SRCDIR"
+fi
 if [ ! -d "$SRCDIR" ]; then
-  dpkg-source -x "linux_${VERSION}.dsc" "$SRCDIR"
+  dpkg-source --no-check -x "$WORK/linux_${VERSION}.dsc" "$SRCDIR"
 fi
 
 if [ -n "$UPSTREAM_TARGET" ] && [ "$UPSTREAM_TARGET" != "$UPSTREAM" ]; then
