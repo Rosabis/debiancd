@@ -21,7 +21,7 @@ set -euo pipefail
 VERSION="${VERSION:-5.10.262-1}"       # Debian 源版本（打包框架 + 补丁集的来源）
 ABI="${ABI:-5.10.0-46}"                # 二进制 ABI 名（与上游修订号解耦）
 SNAPSHOT="${SNAPSHOT:-20260804T131246Z}" # snapshot.debian.org 时间戳
-UPSTREAM_TARGET="${UPSTREAM_TARGET:-}" # 可选：嫁接到 kernel.org 上游版本，如 5.10.274
+UPSTREAM_TARGET="${UPSTREAM_TARGET:-}" # 上游版本号（如 5.10.275）；留空=用 Debian 官方源码
 MODE="${MODE:-both}"                   # official | minimal | both
 HEADERS="${HEADERS:-yes}"              # yes/true/1 = 一并构建 headers 三件套
 # GitHub 表达式可能把 YAML 的 yes 渲染成 true；统一归一化，别让它静默关掉 headers

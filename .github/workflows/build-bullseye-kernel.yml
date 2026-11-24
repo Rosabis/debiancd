@@ -2,7 +2,7 @@ name: build-bullseye-kernel
 
 # 从 Debian 官方源码重建 bullseye 5.10 内核的 linux-image .deb。
 # 默认 5.10.262-1 / ABI 5.10.0-46 —— 这是 Debian 公开源里 bullseye 5.10 的最后一个版本。
-# （5.10.272-1 只在 Freexian 付费 ELTS；5.10.274 是 kernel.org 上游版本，无 Debian 二进制包。）
+# （5.10.272-1 只在 Freexian 付费 ELTS；5.10.275 是 kernel.org 上游版本，无 Debian 二进制包。）
 # 产物为 stripped 的 vmlinuz + .ko；可选再出一个只含这两类的 minimal 包。
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ on:
         description: "snapshot.debian.org 时间戳"
         default: "20260804T131246Z"
       upstream_target:
-        description: "可选：把 Debian 5.10.262 源码嫁接到 kernel.org 上游版本（留空=用官方源码；填 5.10.274=取全部安全修复）"
+        description: "上游 Linux 版本号（如 5.10.275）——打包上游最新内核只需填这一个字段，其余保持默认；留空=Debian 官方源码"
         default: ""
       headers:
         description: "是否一并打包同源 linux-headers（编译 DKMS/VirtualBox/NVIDIA 等第三方模块必需）"
@@ -96,7 +96,7 @@ jobs:
             echo "源码版本：\`${{ inputs.version }}\` → 上游目标：\`${{ inputs.upstream_target || '(官方原样)' }}\`　ABI：\`${{ inputs.abi }}\`　形态：\`${{ inputs.mode }}\`　headers：\`${{ inputs.headers }}\`"
             echo ""
             echo "构建方式：snapshot.debian.org 官方源码 → amd64 单 flavour →"
-            echo "DEBIAN_KERNEL_DISABLE_DEBUG=1；vmlinuz 经 objcopy --strip-debug，"
+            echo "config: signed-code=false / debug-info=false；vmlinuz 经 objcopy --strip-debug，"
             echo ".ko 经 INSTALL_MOD_STRIP=1，均不含调试符号。"
             echo '```'
             for f in work/kernel-out/*.deb; do
