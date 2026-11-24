@@ -1,0 +1,117 @@
+name: build-bullseye-kernel
+
+# 从 Debian 官方源码重建 bullseye 5.10 内核的 linux-image .deb。
+# 默认 5.10.262-1 / ABI 5.10.0-46 —— 这是 Debian 公开源里 bullseye 5.10 的最后一个版本。
+# （5.10.272-1 只在 Freexian 付费 ELTS；5.10.274 是 kernel.org 上游版本，无 Debian 二进制包。）
+# 产物为 stripped 的 vmlinuz + .ko；可选再出一个只含这两类的 minimal 包。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Debian 源版本（公开最后一个 = 5.10.262-1）"
+        default: "5.10.262-1"
+      abi:
+        description: "内核 ABI 名（5.10.262-1 = 5.10.0-46）"
+        default: "5.10.0-46"
+      snapshot:
+        description: "snapshot.debian.org 时间戳"
+        default: "20260804T131246Z"
+      upstream_target:
+        description: "可选：把 Debian 5.10.262 源码嫁接到 kernel.org 上游版本（留空=用官方源码；填 5.10.274=取全部安全修复）"
+        default: ""
+      headers:
+        description: "是否一并打包同源 linux-headers（编译 DKMS/VirtualBox/NVIDIA 等第三方模块必需）"
+        type: choice
+        options: ["yes", "no"]
+        default: "yes"
+      mode:
+        description: "产物形态"
+        type: choice
+        options: [both, official, minimal]
+        default: both
+      jobs:
+        description: "并行编译线程数（留空 = runner 核数）"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # bullseye 已 EOL，仓库搬到 archive.debian.org；用同代容器避免 gcc 版本漂移。
+    container: debian:bullseye-slim
+    timeout-minutes: 350
+    steps:
+      - name: 配置归档源并安装构建依赖
+        run: |
+          set -e
+          cat > /etc/apt/sources.list <<'EOF'
+          deb [check-valid-until=no] http://archive.debian.org/debian bullseye main
+          deb-src [check-valid-until=no] http://archive.debian.org/debian bullseye main
+          deb [check-valid-until=no] http://archive.debian.org/debian-security bullseye-security main
+          deb-src [check-valid-until=no] http://archive.debian.org/debian-security bullseye-security main
+          EOF
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            git ca-certificates curl fakeroot devscripts dpkg-dev quilt \
+            build-essential gcc-10 gcc-10-x86-64-linux-gnu \
+            bc kmod cpio xz-utils bison flex libssl-dev libelf-dev \
+            libncurses-dev dwarves python3 dh-exec dh-python debhelper \
+            kernel-wedge rsync lz4
+          # 以源码包声明为准补齐依赖（archive 上索引齐全，失败也不致命）
+          apt-get build-dep -y -qq linux || true
+
+      - uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          gcc-10 --version | head -1
+          dpkg --version | head -1
+          echo "nproc = $(nproc)"
+
+      - name: 编译并打包内核
+        env:
+          VERSION: ${{ inputs.version }}
+          ABI: ${{ inputs.abi }}
+          SNAPSHOT: ${{ inputs.snapshot }}
+          UPSTREAM_TARGET: ${{ inputs.upstream_target }}
+          HEADERS: ${{ inputs.headers }}
+          MODE: ${{ inputs.mode }}
+          JOBS: ${{ inputs.jobs }}
+          WORK: work/kernel
+          OUT: work/kernel-out
+        run: bash scripts/build-bullseye-kernel.sh
+
+      - name: 摘要
+        run: |
+          {
+            echo "### 产物：bullseye 内核 linux-image"
+            echo '```'
+            ls -lh work/kernel-out/ 2>/dev/null || true
+            echo '```'
+            echo "源码版本：\`${{ inputs.version }}\` → 上游目标：\`${{ inputs.upstream_target || '(官方原样)' }}\`　ABI：\`${{ inputs.abi }}\`　形态：\`${{ inputs.mode }}\`　headers：\`${{ inputs.headers }}\`"
+            echo ""
+            echo "构建方式：snapshot.debian.org 官方源码 → amd64 单 flavour →"
+            echo "DEBIAN_KERNEL_DISABLE_DEBUG=1；vmlinuz 经 objcopy --strip-debug，"
+            echo ".ko 经 INSTALL_MOD_STRIP=1，均不含调试符号。"
+            echo '```'
+            for f in work/kernel-out/*.deb; do
+              [ -e "$f" ] || continue
+              echo "--- $(basename "$f") ---"
+              dpkg-deb -f "$f" Package Version Architecture Installed-Size Depends
+              echo "vmlinuz=$(dpkg-deb -c "$f" | grep -c '/boot/vmlinuz-' || true) ko=$(dpkg-deb -c "$f" | grep -c '\.ko$' || true)"
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bullseye-kernel-${{ inputs.abi }}-${{ inputs.version }}
+          path: |
+            work/kernel-out/*.deb
+            work/kernel-out/*.sha256
+            work/kernel/upstream-patch-log.txt
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
