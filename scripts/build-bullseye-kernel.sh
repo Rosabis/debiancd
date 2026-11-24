@@ -103,7 +103,8 @@ if [ -n "$UPSTREAM_TARGET" ] && [ "$UPSTREAM_TARGET" != "$UPSTREAM" ]; then
   # 完全不动，冲突面最小（上游 stable 只改少量代码）。
   INCR="https://cdn.kernel.org/pub/linux/kernel/v5.x/incr"
   cur="$UPSTREAM"
-  : > "$WORK/upstream-patch-log.txt"
+  PLOG="$WORK/upstream-patch-log.txt"
+  : > "$PLOG"
   while [ "$cur" != "$UPSTREAM_TARGET" ]; do
     n="${cur##*.}"                       # 262
     next="${cur%.*}.$((n + 1))"          # 5.10.263（用于循环和 changelog）
@@ -114,14 +115,31 @@ if [ -n "$UPSTREAM_TARGET" ] && [ "$UPSTREAM_TARGET" != "$UPSTREAM" ]; then
       curl -fsSL --retry 3 --retry-delay 2 -o "$pf" "${INCR}/${pf}"
     fi
     printf '  %-28s' "$pf"
-    if xz -dc "$pf" | ( cd "$SRCDIR" && patch -p1 --forward --batch --fuzz=2 ); then
+    printf '\n===== %s =====\n' "$pf" >> "$PLOG"
+    # 把 patch 的完整输出写进日志：以后再遇到 hunk 失败可直接定位，
+    # 控制台只保留每个补丁的 OK / 检查提示。
+    if xz -dc "$pf" | ( cd "$SRCDIR" && patch -p1 --forward --batch --fuzz=2 ) >> "$PLOG" 2>&1; then
       echo " OK"
     else
-      echo " 检查 upstream-patch-log.txt（可能已由 Debian 补丁 backport 同一修复）"
+      echo " 有 hunk 失败，详见 upstream-patch-log.txt"
     fi
-    xz -dc "$pf" | grep -E '^--- |^\+\+\+ ' >> "$WORK/upstream-patch-log.txt" || true
     cur="$next"
   done
+
+  # 已知冲突修复：5.10.266 把 call_int_hook(FUNC, IRC, ...) 改成两参数形式
+  # （默认值改由 LSM_RET_DEFAULT(FUNC) 提供）。Debian 的
+  # export-symbols-needed-by-android-drivers.patch 在 binder/ptrace 钩子之间
+  # 插入了 EXPORT_SYMBOL_GPL()，使这条增量补丁的 hunk #5 无法应用；其余 89 个
+  # hunk 已成功应用，宏已经变成两参数，但 hunk #5 覆盖的 6 个调用点仍带 ", 0,"，
+  # 展开时参数错位会报 "too many arguments to function 'P->hook.*'" 编译错误。
+  # 这里把遗留调用点补成与上游一致的形式（幂等，后续上游版本再改也不影响）。
+  if grep -q '#define call_int_hook(FUNC, \.\.\.)' "$SRCDIR/security/security.c"; then
+    sed -i -E 's/call_int_hook\(([A-Za-z0-9_]+), 0, /call_int_hook(\1, /g' "$SRCDIR/security/security.c"
+    rm -f "$SRCDIR/security/security.c.rej"
+    echo " 已修正 LSM call_int_hook 遗留调用点（Debian EXPORT_SYMBOL 冲突）"
+  fi
+  left=$(grep -cE 'call_int_hook\([A-Za-z0-9_]+, 0, ' "$SRCDIR/security/security.c" || true)
+  [ "$left" -eq 0 ] || { echo "ERROR: 仍有 $left 个旧式 call_int_hook 调用"; exit 1; }
 
   say "同步源码版本号到 debian/changelog"
   # 只改第一行版本，distribution 保持 bullseye-security（打包规则与 ABI 不变）。
