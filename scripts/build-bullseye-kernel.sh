@@ -44,6 +44,16 @@ HDR_COMMON="linux-headers-${ABI}-common_${SRCVER}_all.deb"
 HDR_KBUILD="linux-kbuild-${KBUILD_VER}_${SRCVER}_amd64.deb"
 BASE="https://snapshot.debian.org/archive/debian-security/${SNAPSHOT}/pool/updates/main/l/linux"
 
+# 这些开关必须在 debian/control 生成之前就生效：gencontrol.py 在那一刻决定
+# 是否生成 -dbg 包、是否把镜像包命名为 -unsigned。
+#   DISABLE_SIGNED=1 -> 产出 linux-image-<ABI>-amd64（官方名字），而不是 -unsigned；
+#                       签名版本来由单独的 linux-signed-amd64 源码包生成，这里用不上。
+#   DISABLE_DEBUG=1  -> 不生成几百 MB 的 linux-image-*-dbg。
+export DEBIAN_KERNEL_DISABLE_SIGNED=1
+export DEBIAN_KERNEL_DISABLE_DEBUG=1
+export DEBIAN_KERNEL_JOBS="$JOBS"
+export DEB_BUILD_PROFILES="nodoc pkg.linux.nosource noudeb pkg.linux.nometa pkg.linux.mintools"
+
 say() { printf '\n=== %s ===\n' "$*"; }
 
 say "构建参数"
@@ -140,7 +150,9 @@ kernel-arch: x86
 
 [build]
 image-file: arch/x86/boot/bzImage
-signed-code: true
+# 关键：必须为 false，否则 gencontrol.py 会选 control.image-unsigned 模板，
+# 产物叫 linux-image-<ABI>-amd64-unsigned，拿不到"官方源那种"包名。
+signed-code: false
 vdso: true
 
 [image]
@@ -161,6 +173,9 @@ hardware-long: cloud platforms including Amazon EC2, Microsoft Azure, and Google
 EOF
 
 say "生成 debian/control（内核规则会故意 exit 1，属预期行为）"
+# 强制重生成：signed-code / featureset / disable_debug 的改动必须反映到
+# control 里，否则 dbg 包和 -unsigned 包会按旧 control 继续构建。
+rm -f "$SRCDIR/debian/control.md5sum"
 ( cd "$SRCDIR" && PYTHONHASHSEED=0 debian/rules debian/control ) || true
 test -s "$SRCDIR/debian/control" || { echo "ERROR: debian/control 生成失败"; exit 1; }
 
@@ -180,16 +195,26 @@ say "编译 amd64 flavour"
 #   !pkg.linux.notools），上面这些 profile 都不影响它们。
 (
   cd "$SRCDIR"
-  export DEBIAN_KERNEL_DISABLE_DEBUG=1
-  export DEBIAN_KERNEL_JOBS="$JOBS"
-  export DEB_BUILD_PROFILES="nodoc pkg.linux.nosource noudeb pkg.linux.nometa pkg.linux.mintools"
   dpkg-buildpackage -b -us -uc -d -j"$JOBS"
 )
 
 say "收集官方结构产物"
-test -s "$WORK/$OFFICIAL" || { echo "ERROR: 找不到 $OFFICIAL"; exit 1; }
-cp -f "$WORK/$OFFICIAL" "$OUT/"
-( cd "$OUT" && sha256sum "$OFFICIAL" > "${OFFICIAL}.sha256" )
+# 正常应产出 $OFFICIAL；万一 Debian 规则仍走了 unsigned 分支，也识别出来并
+# 明确告警，而不是只报一句 "找不到文件" 让人猜。
+IMAGE_SRC=""
+for cand in "$OFFICIAL" "${PKG}-unsigned_${SRCVER}_amd64.deb"; do
+  if [ -s "$WORK/$cand" ]; then IMAGE_SRC="$cand"; break; fi
+done
+if [ -z "$IMAGE_SRC" ]; then
+  echo "ERROR: 找不到 image 包。$WORK 下实际 .deb："
+  ls -lh "$WORK"/*.deb 2>/dev/null || true
+  exit 1
+fi
+if [ "$IMAGE_SRC" != "$OFFICIAL" ]; then
+  echo "注意：实际产出 $IMAGE_SRC（内部 Package 名带 -unsigned）；已改为收集它。"
+fi
+cp -f "$WORK/$IMAGE_SRC" "$OUT/"
+( cd "$OUT" && sha256sum "$IMAGE_SRC" > "${IMAGE_SRC}.sha256" )
 
 if [ "$HEADERS" = "yes" ]; then
   say "收集同源 headers 三件套"
@@ -207,7 +232,7 @@ if [ "$MODE" = "minimal" ] || [ "$MODE" = "both" ]; then
   REPACK="$WORK/repack"
   rm -rf "$REPACK"
   mkdir -p "$REPACK/DEBIAN"
-  dpkg-deb -x "$WORK/$OFFICIAL" "$REPACK"
+  dpkg-deb -x "$WORK/$IMAGE_SRC" "$REPACK"
   # 删掉 boot/ 与 lib/ 之外的所有目录（etc、usr/share/doc 等）
   find "$REPACK" -mindepth 1 -maxdepth 1 \
     ! -name boot ! -name lib ! -name DEBIAN -exec rm -rf {} +
