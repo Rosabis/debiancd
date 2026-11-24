@@ -52,10 +52,13 @@ jobs:
           deb [check-valid-until=no] http://archive.debian.org/debian-security bullseye-security main
           deb-src [check-valid-until=no] http://archive.debian.org/debian-security bullseye-security main
           EOF
+          export DEBIAN_FRONTEND=noninteractive
           apt-get update -qq
+          # gcc-10-x86-64-linux-gnu 是 bookworm+ 的架构限定包名，bullseye 里只有
+          # gcc-10（已从 archive.debian.org 的 Packages 索引逐个核对）。
           apt-get install -y -qq --no-install-recommends \
             git ca-certificates curl fakeroot devscripts dpkg-dev quilt \
-            build-essential gcc-10 gcc-10-x86-64-linux-gnu \
+            build-essential gcc-10 \
             bc kmod cpio xz-utils bison flex libssl-dev libelf-dev \
             libncurses-dev dwarves python3 dh-exec dh-python debhelper \
             kernel-wedge rsync lz4

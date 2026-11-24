@@ -194,7 +194,7 @@ if [ "$MODE" = "minimal" ] || [ "$MODE" = "both" ]; then
   find "$REPACK/boot" -mindepth 1 ! -name 'vmlinuz-*' -exec rm -rf {} +
   cat > "$REPACK/DEBIAN/control" <<EOF
 Package: ${PKG}
-Version: ${VERSION}
+Version: ${SRCVER}
 Section: kernel
 Priority: optional
 Architecture: amd64
